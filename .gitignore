@@ -1,0 +1,9 @@
+#exlude
+test9/*
+
+#include
+!test9/dihedral_encoder.pt  
+!test9/latent.txt
+
+
+
