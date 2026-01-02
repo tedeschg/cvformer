@@ -1,11 +1,11 @@
 # ==========================================================
-# Dihedral Transformer Autoencoder - IMPROVED VERSION
+# Dihedral Transformer Autoencoder - FIXED VERSION 2.0
 # ==========================================================
 # - Input: phi/psi dihedral angles from MD (radians)
 # - Representation: sin/cos
-# - Model: Transformer encoder + pooling + decoder
+# - Model: Transformer encoder + attention pooling + decoder with learned queries
 # - Positional encoding: learnable
-# - Proper validation, checkpointing, and logging
+# - Proper temporal validation split and attention-based pooling
 # ==========================================================
 
 import math
@@ -14,9 +14,8 @@ from pathlib import Path
 import numpy as np
 import torch
 import torch.nn as nn
-from torch.utils.data import Dataset, DataLoader, random_split
+from torch.utils.data import Dataset, DataLoader, Subset
 import mdtraj as md
-from tqdm import tqdm
 
 
 # Set seeds for reproducibility
@@ -112,7 +111,7 @@ class LearnablePositionalEncoding(nn.Module):
 
 
 # ----------------------------------------------------------
-# 4. Transformer autoencoder (PROPERLY IMPLEMENTED)
+# 4. Transformer autoencoder with FIXED decoder
 # ----------------------------------------------------------
 
 class DihedralTransformerAE(nn.Module):
@@ -125,7 +124,7 @@ class DihedralTransformerAE(nn.Module):
             num_decoder_layers=3,
             dim_feedforward=256,
             dropout=0.1,
-            latent_dim=2,
+            latent_dim=8,  # Increased default from 2 to 8
     ):
         super().__init__()
 
@@ -136,8 +135,8 @@ class DihedralTransformerAE(nn.Module):
         # Input projection: (sin, cos, sin, cos) -> d_model
         self.input_proj = nn.Linear(4, d_model)
 
-        # Positional encoding
-        self.pos_enc = LearnablePositionalEncoding(d_model, max_len=n_residues)
+        # Positional encoding for encoder
+        self.pos_enc_encoder = LearnablePositionalEncoding(d_model, max_len=n_residues)
 
         # Layer normalization
         self.input_norm = nn.LayerNorm(d_model)
@@ -149,11 +148,18 @@ class DihedralTransformerAE(nn.Module):
             dim_feedforward=dim_feedforward,
             dropout=dropout,
             batch_first=True,
-            norm_first=True,  # Pre-norm for better training
+            norm_first=True,
         )
         self.encoder = nn.TransformerEncoder(encoder_layer, num_encoder_layers)
 
-        # Bottleneck: sequence -> latent
+        # FIXED: Attention-based pooling instead of mean pooling
+        self.attention_pool = nn.Sequential(
+            nn.Linear(d_model, d_model),
+            nn.Tanh(),
+            nn.Linear(d_model, 1),
+        )
+
+        # Bottleneck: pooled representation -> latent
         self.to_latent = nn.Sequential(
             nn.Linear(d_model, dim_feedforward),
             nn.LayerNorm(dim_feedforward),
@@ -162,7 +168,10 @@ class DihedralTransformerAE(nn.Module):
             nn.Linear(dim_feedforward, latent_dim),
         )
 
-        # Expand: latent -> sequence initialization
+        # FIXED: Learned queries for decoder (one per residue)
+        self.residue_queries = nn.Parameter(torch.randn(1, n_residues, d_model) * 0.02)
+
+        # Expand: latent -> decoder context
         self.from_latent = nn.Sequential(
             nn.Linear(latent_dim, dim_feedforward),
             nn.LayerNorm(dim_feedforward),
@@ -170,6 +179,9 @@ class DihedralTransformerAE(nn.Module):
             nn.Dropout(dropout),
             nn.Linear(dim_feedforward, d_model),
         )
+
+        # Positional encoding for decoder
+        self.pos_enc_decoder = LearnablePositionalEncoding(d_model, max_len=n_residues)
 
         # Transformer decoder
         decoder_layer = nn.TransformerEncoderLayer(
@@ -182,11 +194,12 @@ class DihedralTransformerAE(nn.Module):
         )
         self.decoder = nn.TransformerEncoder(decoder_layer, num_decoder_layers)
 
-        # Output projection back to sin/cos
+        # FIXED: Output with Tanh to constrain to [-1, 1]
         self.output_proj = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.GELU(),
             nn.Linear(d_model, 4),
+            nn.Tanh(),  # Constrain output to [-1, 1] for sin/cos
         )
 
         self._init_parameters()
@@ -199,7 +212,7 @@ class DihedralTransformerAE(nn.Module):
 
     def encode(self, x, mask=None):
         """
-        Encode input to latent representation.
+        Encode input to latent representation using attention pooling.
 
         Args:
             x: (B, N_res, 4)
@@ -211,7 +224,7 @@ class DihedralTransformerAE(nn.Module):
 
         # Project input
         x = self.input_proj(x)  # (B, N, d_model)
-        x = self.pos_enc(x)
+        x = self.pos_enc_encoder(x)
         x = self.input_norm(x)
 
         # Create padding mask for transformer
@@ -223,39 +236,52 @@ class DihedralTransformerAE(nn.Module):
         # Transformer encoder
         h = self.encoder(x, src_key_padding_mask=src_key_padding_mask)
 
-        # Global pooling (masked mean)
+        # FIXED: Attention-based pooling
+        attention_scores = self.attention_pool(h).squeeze(-1)  # (B, N)
+
         if mask is not None:
-            mask_expanded = mask.unsqueeze(0).unsqueeze(-1).float()
-            h_masked = h * mask_expanded
-            h_pooled = h_masked.sum(dim=1) / mask_expanded.sum(dim=1)
-        else:
-            h_pooled = h.mean(dim=1)
+            # Mask out invalid positions
+            attention_scores = attention_scores.masked_fill(~mask.unsqueeze(0), -1e9)
+
+        attention_weights = torch.softmax(attention_scores, dim=1)  # (B, N)
+        h_pooled = (h * attention_weights.unsqueeze(-1)).sum(dim=1)  # (B, d_model)
 
         # Project to latent space
         z = self.to_latent(h_pooled)
 
         return z
 
-    def decode(self, z):
+    def decode(self, z, mask=None):
         """
-        Decode latent to output.
+        Decode latent to output using learned queries.
 
         Args:
             z: (B, latent_dim)
+            mask: (N_res,) boolean mask for valid positions
         Returns:
             x_hat: (B, N_res, 4)
         """
         B = z.size(0)
 
-        # Expand latent to sequence
-        h = self.from_latent(z)  # (B, d_model)
-        h = h.unsqueeze(1).expand(B, self.n_res, self.d_model)
+        # FIXED: Use learned queries (different for each residue)
+        queries = self.residue_queries.expand(B, -1, -1)  # (B, N_res, d_model)
+
+        # Context from latent
+        context = self.from_latent(z).unsqueeze(1)  # (B, 1, d_model)
+
+        # Combine queries with context (broadcast addition)
+        h = queries + context  # (B, N_res, d_model)
 
         # Add positional encoding
-        h = self.pos_enc(h)
+        h = self.pos_enc_decoder(h)
+
+        # FIXED: Pass mask to decoder
+        src_key_padding_mask = None
+        if mask is not None:
+            src_key_padding_mask = ~mask.unsqueeze(0).expand(B, -1)
 
         # Transformer decoder
-        h = self.decoder(h)
+        h = self.decoder(h, src_key_padding_mask=src_key_padding_mask)
 
         # Project to output
         x_hat = self.output_proj(h)
@@ -274,26 +300,23 @@ class DihedralTransformerAE(nn.Module):
             z: (B, latent_dim)
         """
         z = self.encode(x, mask)
-        x_hat = self.decode(z)
+        x_hat = self.decode(z, mask)
         return x_hat, z
 
 
 # ----------------------------------------------------------
-# 5. Loss function
+# 5. Loss function (simplified, no normalization constraint)
 # ----------------------------------------------------------
 
-def dihedral_loss(x_hat, x, mask=None, lambda_norm=0.1):
+def dihedral_loss(x_hat, x, mask=None):
     """
-    Combined reconstruction and normalization loss.
+    Reconstruction loss only (normalization constraint removed due to Tanh).
 
     Args:
         x_hat, x: (B, N, 4)
         mask: (N,) boolean mask for valid positions
-        lambda_norm: weight for normalization constraint
     Returns:
         total_loss: scalar
-        recon_loss: scalar (for logging)
-        norm_loss: scalar (for logging)
     """
     # Apply mask if provided
     if mask is not None:
@@ -309,61 +332,61 @@ def dihedral_loss(x_hat, x, mask=None, lambda_norm=0.1):
     # Reconstruction loss
     recon = ((x_hat_masked - x_masked) ** 2).sum() / (n_valid * x.shape[0])
 
-    # Normalization constraint: sin^2 + cos^2 = 1
-    sin_phi, cos_phi = x_hat[..., 0], x_hat[..., 1]
-    sin_psi, cos_psi = x_hat[..., 2], x_hat[..., 3]
-
-    norm_phi = (sin_phi ** 2 + cos_phi ** 2 - 1) ** 2
-    norm_psi = (sin_psi ** 2 + cos_psi ** 2 - 1) ** 2
-
-    if mask is not None:
-        norm = (norm_phi + norm_psi) * mask.unsqueeze(0)
-        norm = norm.sum() / (n_valid * x.shape[0])
-    else:
-        norm = (norm_phi + norm_psi).mean()
-
-    total_loss = recon + lambda_norm * norm
-
-    return total_loss, recon, norm
+    return recon
 
 
 # ----------------------------------------------------------
-# 6. Training and validation
+# 6. Learning rate warmup scheduler
 # ----------------------------------------------------------
 
-def train_epoch(model, loader, optimizer, device, lambda_norm=0.1):
+def get_warmup_scheduler(optimizer, warmup_steps, total_steps):
+    """
+    Creates a learning rate scheduler with linear warmup and cosine decay.
+    """
+
+    def lr_lambda(step):
+        if step < warmup_steps:
+            return step / warmup_steps
+        else:
+            progress = (step - warmup_steps) / (total_steps - warmup_steps)
+            return 0.5 * (1 + math.cos(math.pi * progress))
+
+    return torch.optim.lr_scheduler.LambdaLR(optimizer, lr_lambda)
+
+
+# ----------------------------------------------------------
+# 7. Training and validation
+# ----------------------------------------------------------
+
+def train_epoch(model, loader, optimizer, device, scheduler=None):
     """Train for one epoch."""
     model.train()
     total_loss = 0.0
-    total_recon = 0.0
-    total_norm = 0.0
 
     for batch, mask in loader:
         batch = batch.to(device)
         mask = mask.to(device)
 
         x_hat, z = model(batch, mask)
-        loss, recon, norm = dihedral_loss(x_hat, batch, mask, lambda_norm)
+        loss = dihedral_loss(x_hat, batch, mask)
 
         optimizer.zero_grad()
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
         optimizer.step()
 
+        if scheduler is not None:
+            scheduler.step()
+
         total_loss += loss.item()
-        total_recon += recon.item()
-        total_norm += norm.item()
 
-    n_batches = len(loader)
-    return total_loss / n_batches, total_recon / n_batches, total_norm / n_batches
+    return total_loss / len(loader)
 
 
-def validate(model, loader, device, lambda_norm=0.1):
+def validate(model, loader, device):
     """Validate the model."""
     model.eval()
     total_loss = 0.0
-    total_recon = 0.0
-    total_norm = 0.0
 
     with torch.no_grad():
         for batch, mask in loader:
@@ -371,14 +394,11 @@ def validate(model, loader, device, lambda_norm=0.1):
             mask = mask.to(device)
 
             x_hat, z = model(batch, mask)
-            loss, recon, norm = dihedral_loss(x_hat, batch, mask, lambda_norm)
+            loss = dihedral_loss(x_hat, batch, mask)
 
             total_loss += loss.item()
-            total_recon += recon.item()
-            total_norm += norm.item()
 
-    n_batches = len(loader)
-    return total_loss / n_batches, total_recon / n_batches, total_norm / n_batches
+    return total_loss / len(loader)
 
 
 def extract_latents(model, loader, device):
@@ -398,7 +418,7 @@ def extract_latents(model, loader, device):
 
 
 # ----------------------------------------------------------
-# 7. Main training script
+# 8. Main training script
 # ----------------------------------------------------------
 
 def main(args):
@@ -431,12 +451,17 @@ def main(args):
     # Create dataset
     dataset = DihedralDataset(phi, psi, mask)
 
-    # Train/validation split
+    # FIXED: Temporal split instead of random split
     train_size = int(args.train_split * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_indices = list(range(train_size))
+    val_indices = list(range(train_size, len(dataset)))
 
-    print(f"Train set: {len(train_dataset)}, Val set: {len(val_dataset)}")
+    train_dataset = Subset(dataset, train_indices)
+    val_dataset = Subset(dataset, val_indices)
+
+    print(f"Train set: {len(train_dataset)} (frames 0-{train_size - 1})")
+    print(f"Val set: {len(val_dataset)} (frames {train_size}-{len(dataset) - 1})")
+    print("NOTE: Using temporal split to avoid data leakage")
 
     # DataLoaders
     train_loader = DataLoader(
@@ -464,16 +489,24 @@ def main(args):
         latent_dim=args.latent_dim,
     ).to(device)
 
-    print(f"Model parameters: {sum(p.numel() for p in model.parameters()):,}")
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    print(f"Model parameters: {n_params:,} (trainable: {n_trainable:,})")
 
-    # Optimizer and scheduler
+    # Optimizer
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
     )
 
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+    # FIXED: Warmup scheduler
+    total_steps = args.epochs * len(train_loader)
+    warmup_steps = args.warmup_epochs * len(train_loader)
+    warmup_scheduler = get_warmup_scheduler(optimizer, warmup_steps, total_steps)
+
+    # Plateau scheduler (kicks in after warmup)
+    plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
         optimizer,
         mode='min',
         factor=0.5,
@@ -486,25 +519,26 @@ def main(args):
     patience_counter = 0
 
     print("\nStarting training...")
+    print(f"Warmup for {args.warmup_epochs} epochs, then cosine decay")
+
     for epoch in range(args.epochs):
         # Train
-        train_loss, train_recon, train_norm = train_epoch(
-            model, train_loader, optimizer, device, args.lambda_norm
-        )
+        train_loss = train_epoch(model, train_loader, optimizer, device, warmup_scheduler)
 
         # Validate
-        val_loss, val_recon, val_norm = validate(
-            model, val_loader, device, args.lambda_norm
-        )
+        val_loss = validate(model, val_loader, device)
 
-        # Scheduler step
-        scheduler.step(val_loss)
+        # Plateau scheduler (only after warmup)
+        if epoch >= args.warmup_epochs:
+            plateau_scheduler.step(val_loss)
 
         # Logging
-        if epoch % args.log_interval == 0:
+        if epoch % args.log_interval == 0 or epoch < 10:
+            current_lr = optimizer.param_groups[0]['lr']
             print(f"Epoch {epoch:04d} | "
-                  f"Train Loss: {train_loss:.6f} (R: {train_recon:.6f}, N: {train_norm:.6f}) | "
-                  f"Val Loss: {val_loss:.6f} (R: {val_recon:.6f}, N: {val_norm:.6f})")
+                  f"Train Loss: {train_loss:.6f} | "
+                  f"Val Loss: {val_loss:.6f} | "
+                  f"LR: {current_lr:.2e}")
 
         # Save best model
         if val_loss < best_val_loss:
@@ -519,7 +553,8 @@ def main(args):
                 'config': vars(args),
             }, output_dir / 'best_model.pt')
 
-            print(f"  → Saved best model (val_loss: {val_loss:.6f})")
+            if epoch % args.log_interval == 0:
+                print(f"  → Saved best model (val_loss: {val_loss:.6f})")
         else:
             patience_counter += 1
 
@@ -532,9 +567,10 @@ def main(args):
     print("\nLoading best model...")
     checkpoint = torch.load(output_dir / 'best_model.pt')
     model.load_state_dict(checkpoint['model_state_dict'])
+    print(f"Best validation loss: {checkpoint['val_loss']:.6f} at epoch {checkpoint['epoch']}")
 
     # Extract latents from full dataset
-    print("Extracting latent representations...")
+    print("\nExtracting latent representations...")
     full_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     latents = extract_latents(model, full_loader, device)
 
@@ -577,14 +613,14 @@ if __name__ == "__main__":
                         help='Batch size')
     parser.add_argument('--epochs', type=int, default=1000,
                         help='Maximum number of epochs')
-    parser.add_argument('--lr', type=float, default=1e-4,
-                        help='Learning rate')
+    parser.add_argument('--lr', type=float, default=3e-4,
+                        help='Learning rate (increased default to 3e-4)')
     parser.add_argument('--weight_decay', type=float, default=1e-5,
                         help='Weight decay')
-    parser.add_argument('--lambda_norm', type=float, default=0.1,
-                        help='Weight for normalization loss')
     parser.add_argument('--train_split', type=float, default=0.9,
-                        help='Fraction of data for training')
+                        help='Fraction of data for training (temporal split)')
+    parser.add_argument('--warmup_epochs', type=int, default=10,
+                        help='Number of warmup epochs')
 
     # Optimization
     parser.add_argument('--patience', type=int, default=100,
@@ -602,4 +638,3 @@ if __name__ == "__main__":
 
     args = parser.parse_args()
     main(args)
-
