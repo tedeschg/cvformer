@@ -1,9 +1,10 @@
 #exlude
 test11/
+test/
 analyze/
 __pycache__/
 *.pyc
 .env
 .venv/
 .idea/
-
+!test/runit.sh
