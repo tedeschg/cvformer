@@ -92,8 +92,8 @@ class DihedralTransformerAE(nn.Module):
         """
         phi = x[..., 0:2]
         psi = x[..., 2:4]
-        phi = phi / (phi.norm(dim=-1, keepdim=True) + eps)
-        psi = psi / (psi.norm(dim=-1, keepdim=True) + eps)
+        phi = phi / (phi.norm(p=2, dim=-1, keepdim=True) + eps)
+        psi = psi / (psi.norm(p=2, dim=-1, keepdim=True) + eps)
         return torch.cat([phi, psi], dim=-1)
 
     def encode(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
@@ -106,11 +106,11 @@ class DihedralTransformerAE(nn.Module):
         h = self.pos_enc(h)
         h = self.input_norm(h)
 
-        src_key_padding_mask = None
         if mask is not None:
-            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)  # (B, N) True=ignore
-
-        h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)  # (B, N, d_model)
+            src_key_padding_mask = (~mask).expand(B, -1)  # (B, N) True=ignore
+            h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)  # (B, N, d_model)
+        else:
+            h = self.encoder(h)  # (B, N, d_model) - no mask
 
         # Attention pooling
         scores = self.attn_pool(h).squeeze(-1)  # (B, N)
@@ -134,11 +134,11 @@ class DihedralTransformerAE(nn.Module):
         h = queries + context  # broadcast add
         h = self.pos_enc(h)
 
-        src_key_padding_mask = None
         if mask is not None:
-            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)
-
-        h = self.decoder(h, src_key_padding_mask=src_key_padding_mask)
+            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)  # (B, N) True=ignore
+            h = self.decoder(h, src_key_padding_mask=src_key_padding_mask)
+        else:
+            h = self.decoder(h)
 
         x_hat = self.output_proj(h)
         x_hat = self._normalize_sincos_pairs(x_hat)

@@ -192,7 +192,7 @@ def main(args):
     np.savetxt(output_dir / "mae_psi.txt", np.array(mae_psi_hist))
 
     # Load best model
-    ckpt = torch.load(output_dir / "best_model.pt", map_location=device)
+    ckpt = torch.load(output_dir / "best_model.pt", map_location=device, weights_only=False)
     model.load_state_dict(ckpt["model_state_dict"])
     print(f"\nLoaded best model: val_loss={ckpt['val_loss']:.6f} at epoch={ckpt['epoch']}")
 
@@ -232,7 +232,8 @@ def main(args):
             return z
 
     flat_encoder = FlattenEncoder(model)
-    scripted_encoder = torch.jit.trace(flat_encoder, torch.zeros(1, 4 * n_tokens, device=device))
+    flat_encoder.eval()
+    scripted_encoder = torch.jit.script(flat_encoder)
     scripted_encoder.save(output_dir / "dihedral_encoder_plumed.pt")
 
     print(f"✓ Saved PLUMED-compatible encoder: {output_dir / 'dihedral_encoder_plumed.pt'}")
