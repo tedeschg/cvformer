@@ -1,10 +1,17 @@
-#exlude
+#folders
 test11/
 test/
 analyze/
 __pycache__/
-*.pyc
-.env
 .venv/
 .idea/
+
+# Files
+*.pyc
+.env
+
+# Include
 !test/runit.sh
+!analyze/cv_analysis.png
+!analyze/cv_analysis_guglielmo_implementation.png
+
