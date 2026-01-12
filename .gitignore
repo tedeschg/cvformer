@@ -11,7 +11,7 @@ __pycache__/
 .env
 
 # Include specific files
-!test/runit.sh
+!analyze/
 !analyze/cv_analysis_implemented_code.png
 !analyze/cv_analysis_toroidal_implemented_code.png
 
