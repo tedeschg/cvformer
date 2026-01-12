@@ -32,6 +32,7 @@ class DihedralTransformerAE(nn.Module):
             dropout=dropout,
             batch_first=True,
             norm_first=True,
+            activation='gelu'
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_encoder_layers)
 
@@ -68,6 +69,7 @@ class DihedralTransformerAE(nn.Module):
             dropout=dropout,
             batch_first=True,
             norm_first=True,
+            activation="gelu"
         )
         self.decoder = nn.TransformerEncoder(dec_layer, num_layers=num_decoder_layers)
 

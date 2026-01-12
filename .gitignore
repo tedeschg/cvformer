@@ -1,4 +1,4 @@
-# Folders 
+# Folders
 test11/*
 test/*
 analyze/*
@@ -12,6 +12,6 @@ __pycache__/
 
 # Include specific files
 !test/runit.sh
-!analyze/cv_analysis.png
-!analyze/cv_analysis_guglielmo_implementation.png
+!analyze/cv_analysis_implemented_code.png
+!analyze/cv_analysis_toroidal_implemented_code.png
 
