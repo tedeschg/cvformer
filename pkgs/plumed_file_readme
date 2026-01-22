@@ -1,0 +1,7 @@
+python /home/tedeschg/prj/cvformer/pkgs/make_plumed_file.py \
+  --top /home/tedeschg/prj/cvformer/test02/2JOF-0-proteinNoH.pdb \
+  --traj /home/tedeschg/prj/cvformer/test02/traj_skip100NoH.xtc \
+  --pt /home/tedeschg/prj/cvformer/test02/output/dihedral_encoder_plumed.pt \
+  --whole_entity0 1-272 \
+  --latents /home/tedeschg/prj/cvformer/test02/output/latents.npy \
+  --out plumed.dat

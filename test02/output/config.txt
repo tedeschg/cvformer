@@ -1,5 +1,5 @@
-trajectory: /home/tedeschg/prj/cvformer/test11/traj_skip100NoH.xtc
-topology: /home/tedeschg/prj/cvformer/test11/2JOF-0-proteinNoH.pdb
+trajectory: traj_skip100NoH.xtc
+topology: 2JOF-0-proteinNoH.pdb
 output_dir: output
 d_model: 64
 nhead: 8

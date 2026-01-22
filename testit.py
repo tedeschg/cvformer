@@ -216,19 +216,17 @@ def main(args):
     print("Exporting model for PLUMED integration...")
     print(f"{'=' * 60}")
 
-    # FlattenEncoder wrapper for PLUMED (expects flat input)
     class FlattenEncoder(nn.Module):
-        """Wrapper that takes flat (4*n_tokens,) input for PLUMED."""
         def __init__(self, encoder):
             super().__init__()
             self.encoder = encoder
             self.n_tokens = encoder.n_tokens
 
         def forward(self, x_flat):
-            # x_flat: (batch, 4*n_tokens)
-            batch_size = x_flat.shape[0]
-            x = x_flat.view(batch_size, self.n_tokens, 4)
-            z = self.encoder.encode(x, mask=None)  # PLUMED will handle masking externally if needed
+            # x_flat: (B, 4*N) = [sphi0,cphi0,spsi0,cpsi0, sphi1,cphi1,spsi1,cpsi1, ...]
+            B = x_flat.shape[0]
+            x = x_flat.view(B, self.n_tokens, 4)
+            z = self.encoder.encode(x, mask=None)
             return z
 
     flat_encoder = FlattenEncoder(model)
@@ -239,6 +237,7 @@ def main(args):
     print(f"✓ Saved PLUMED-compatible encoder: {output_dir / 'dihedral_encoder_plumed.pt'}")
     print(f"  Input shape: (batch, {4 * n_tokens}) = flat sin/cos for {n_tokens} residues")
     print(f"  Output shape: (batch, {args.latent_dim})")
+
 
     # Save metadata for PLUMED integration
     import json

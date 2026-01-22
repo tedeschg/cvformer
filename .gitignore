@@ -1,7 +1,8 @@
 # Folders
-test11/*
-test/*
-analyze/*
+/test/*
+/test02/*
+/test02/output/*
+/analyze/*
 __pycache__/
 .venv/
 .idea/
@@ -11,7 +12,15 @@ __pycache__/
 .env
 
 # Include specific files
-!analyze/
-!analyze/cv_analysis_implemented_code.png
-!analyze/cv_analysis_toroidal_implemented_code.png
+
+
+!/analyze/
+!/analyze/cv_analysis-by-psi.png
+
+!/test02/
+!/test02/runit.sh
+!/test02/output/
+!/test02/output/plumed.dat
+!/test02/output/config.txt
+!/test02/output/dihedral_encoder_plumed.pt
 
