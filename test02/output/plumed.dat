@@ -109,4 +109,5 @@ cphi17: MATHEVAL ARG=phi17 FUNC=cos(x) PERIODIC=NO
 spsi17: MATHEVAL ARG=psi17 FUNC=sin(x) PERIODIC=NO
 cpsi17: MATHEVAL ARG=psi17 FUNC=cos(x) PERIODIC=NO
 model: PYTORCH_MODEL FILE=dihedral_encoder_plumed.pt ARG=sphi0,cphi0,spsi0,cpsi0,sphi1,cphi1,spsi1,cpsi1,sphi2,cphi2,spsi2,cpsi2,sphi3,cphi3,spsi3,cpsi3,sphi4,cphi4,spsi4,cpsi4,sphi5,cphi5,spsi5,cpsi5,sphi6,cphi6,spsi6,cpsi6,sphi7,cphi7,spsi7,cpsi7,sphi8,cphi8,spsi8,cpsi8,sphi9,cphi9,spsi9,cpsi9,sphi10,cphi10,spsi10,cpsi10,sphi11,cphi11,spsi11,cpsi11,sphi12,cphi12,spsi12,cpsi12,sphi13,cphi13,spsi13,cpsi13,sphi14,cphi14,spsi14,cpsi14,sphi15,cphi15,spsi15,cpsi15,sphi16,cphi16,spsi16,cpsi16,sphi17,cphi17,spsi17,cpsi17
-PRINT FILE=COLVAR ARG=model.node-0,model.node-1 STRIDE=100
+metad: METAD ARG=model.node-0,model.node-1 PACE=1000 HEIGHT=1.0 BIASFACTOR=15.0 SIGMA=1.0380617380142212,0.9565151333808899 GRID_MIN=-72.73883819580078,-67.07268524169922 GRID_MAX=72.58979797363281,66.83943176269531 FILE=HILLS
+PRINT FILE=COLVAR ARG=model.node-0,model.node-1,metad.bias STRIDE=100

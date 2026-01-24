@@ -26,6 +26,5 @@
   ],
   "output_shape": [
     2
-  ],
-  "notes": "Input: flat array [sin(phi_0), cos(phi_0), sin(psi_0), cos(psi_0), sin(phi_1), ...] for residues in residue_ids"
+  ]
 }
