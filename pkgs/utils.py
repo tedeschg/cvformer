@@ -3,6 +3,7 @@ import torch
 import mdtraj as md
 from torch.utils.data import Dataset
 
+
 # -----------------------------
 # Utilities: sin/cos
 # -----------------------------
@@ -31,6 +32,7 @@ def circular_diff(a: torch.Tensor, b: torch.Tensor) -> torch.Tensor:
     """
     d = a - b
     return torch.atan2(torch.sin(d), torch.cos(d))
+
 
 # -----------------------------
 # Robust dihedral alignment
@@ -73,6 +75,7 @@ def compute_aligned_phi_psi(traj: md.Trajectory):
 
     mask = np.ones(common.size, dtype=bool)
     return phi_aligned, psi_aligned, common, mask
+
 
 # -----------------------------
 # Dataset (mask NOT returned)

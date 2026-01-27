@@ -1,17 +1,12 @@
 # ==========================================================
-# Dihedral Transformer Autoencoder - VERSION 2.2 (REWRITE)
+# Dihedral Transformer Autoencoder - VERSION 2.3 (CLS POOLING)
 # ==========================================================
-# Fixes & upgrades applied:
-# - Robust phi/psi alignment by residue using mdtraj phi_idx/psi_idx
-# - Mask is constant (NOT batched by DataLoader)
-# - Proper unit-circle projection for sin/cos pairs (phi and psi)
-# - Stable loss scaling (MSE over B*N_valid*4)
-# - Warmup + cosine scheduler with safety guards and clamped progress
-# - Validation adds circular angular MAE for phi/psi
-# - Saves latents as .npy and .txt (+ residue id mapping)
+# Changes vs 2.2:
+# - Encoder pooling switched to CLS token (BERT-style)
+# - PLUMED integration remains: encoder takes flat sin/cos (4*N)
+# - plumed_info.json clarifies sin/cos-only interface
 # ==========================================================
 
-import math
 import argparse
 import numpy as np
 import torch
@@ -24,6 +19,8 @@ from torch.utils.data import DataLoader, Subset
 from pkgs.utils import angles_to_sincos, compute_aligned_phi_psi, DihedralDataset
 from pkgs.model import DihedralTransformerAE, WarmupCosineScheduler
 from pkgs.train import validate_with_metrics, train_epoch, extract_latents
+
+
 # -----------------------------
 # Reproducibility
 # -----------------------------
@@ -31,6 +28,7 @@ def set_seed(seed: int = 42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+
 
 # -----------------------------
 # Main
@@ -217,16 +215,16 @@ def main(args):
     print(f"{'=' * 60}")
 
     class FlattenEncoder(nn.Module):
-        def __init__(self, encoder):
+        def __init__(self, ae_model: DihedralTransformerAE):
             super().__init__()
-            self.encoder = encoder
-            self.n_tokens = encoder.n_tokens
+            self.ae = ae_model
+            self.n_tokens = ae_model.n_tokens
 
-        def forward(self, x_flat):
+        def forward(self, x_flat: torch.Tensor) -> torch.Tensor:
             # x_flat: (B, 4*N) = [sphi0,cphi0,spsi0,cpsi0, sphi1,cphi1,spsi1,cpsi1, ...]
             B = x_flat.shape[0]
             x = x_flat.view(B, self.n_tokens, 4)
-            z = self.encoder.encode(x, mask=None)
+            z = self.ae.encode(x, mask=None)  # PLUMED: expects full set, no masking
             return z
 
     flat_encoder = FlattenEncoder(model)
@@ -238,16 +236,21 @@ def main(args):
     print(f"  Input shape: (batch, {4 * n_tokens}) = flat sin/cos for {n_tokens} residues")
     print(f"  Output shape: (batch, {args.latent_dim})")
 
-
     # Save metadata for PLUMED integration
     import json
+
     plumed_info = {
+        "interface": "sincos_only",
         "n_tokens": int(n_tokens),
         "latent_dim": int(args.latent_dim),
         "residue_ids": residue_ids.tolist(),
         "input_shape": [4 * n_tokens],
         "output_shape": [args.latent_dim],
-        "notes": "Input: flat array [sin(phi_0), cos(phi_0), sin(psi_0), cos(psi_0), sin(phi_1), ...] for residues in residue_ids"
+        "notes": (
+            "Input is a flat array of length 4*N in token order: "
+            "[sin(phi_0), cos(phi_0), sin(psi_0), cos(psi_0), sin(phi_1), ...]. "
+            "Encoder uses CLS pooling internally; PLUMED should provide sin/cos variables."
+        ),
     }
     with open(output_dir / "plumed_info.json", "w") as f:
         json.dump(plumed_info, f, indent=2)
@@ -261,7 +264,7 @@ def main(args):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train Dihedral Transformer Autoencoder (aligned phi/psi, fixed masking, angular metrics)",
+        description="Train Dihedral Transformer Autoencoder (aligned phi/psi, fixed masking, angular metrics, CLS pooling)",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 

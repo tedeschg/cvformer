@@ -2,6 +2,8 @@ import torch
 
 from pkgs.utils import sincos_to_angle_torch, circular_diff
 from pkgs.model import dihedral_loss
+
+
 # -----------------------------
 # Metrics (angular MAE)
 # -----------------------------
@@ -104,4 +106,3 @@ def extract_latents(model, loader, device, mask):
         z = model.encode(batch, mask)
         latents.append(z.cpu())
     return torch.cat(latents, dim=0).numpy()
-

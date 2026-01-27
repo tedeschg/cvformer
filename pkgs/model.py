@@ -1,10 +1,26 @@
 import torch
 import torch.nn as nn
 import math
+
 # -----------------------------
 # Model
 # -----------------------------
 class DihedralTransformerAE(nn.Module):
+    """
+    Autoencoder for dihedral sin/cos tokens with Transformer encoder/decoder.
+
+    Encoder: CLS pooling (BERT-style)
+      - prepend a learnable CLS token
+      - run TransformerEncoder
+      - take CLS output as global sequence representation
+      - project to latent
+
+    Decoder:
+      - latent -> context
+      - learned residue queries + context
+      - run TransformerEncoder as a decoder stack (self-attn only)
+      - project back to (sin,cos, sin,cos) and normalize pairs on unit circle
+    """
     def __init__(
         self,
         n_tokens: int,
@@ -22,8 +38,13 @@ class DihedralTransformerAE(nn.Module):
         self.latent_dim = latent_dim
 
         self.input_proj = nn.Linear(4, d_model)
-        self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=n_tokens)
+
+        # +1 length to account for CLS at position 0
+        self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=n_tokens + 1)
         self.input_norm = nn.LayerNorm(d_model)
+
+        # Learnable CLS token
+        self.cls_token = nn.Parameter(torch.randn(1, 1, d_model) * 0.02)
 
         enc_layer = nn.TransformerEncoderLayer(
             d_model=d_model,
@@ -32,16 +53,9 @@ class DihedralTransformerAE(nn.Module):
             dropout=dropout,
             batch_first=True,
             norm_first=True,
-            activation='gelu'
+            activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_encoder_layers)
-
-        # Attention pooling (more expressive than mean pooling)
-        self.attn_pool = nn.Sequential(
-            nn.Linear(d_model, d_model),
-            nn.Tanh(),
-            nn.Linear(d_model, 1),
-        )
 
         self.to_latent = nn.Sequential(
             nn.Linear(d_model, dim_feedforward),
@@ -69,7 +83,7 @@ class DihedralTransformerAE(nn.Module):
             dropout=dropout,
             batch_first=True,
             norm_first=True,
-            activation="gelu"
+            activation="gelu",
         )
         self.decoder = nn.TransformerEncoder(dec_layer, num_layers=num_decoder_layers)
 
@@ -104,40 +118,50 @@ class DihedralTransformerAE(nn.Module):
         mask: (N,) bool True=valid, False=ignore
         """
         B, N, _ = x.shape
-        h = self.input_proj(x)
+        if N != self.n_tokens:
+            raise ValueError(f"Expected N={self.n_tokens}, got N={N}")
+
+        h = self.input_proj(x)  # (B, N, d_model)
+
+        # prepend CLS
+        cls = self.cls_token.expand(B, -1, -1)  # (B, 1, d_model)
+        h = torch.cat([cls, h], dim=1)          # (B, 1+N, d_model)
+
         h = self.pos_enc(h)
         h = self.input_norm(h)
 
         if mask is not None:
-            src_key_padding_mask = (~mask).expand(B, -1)  # (B, N) True=ignore
-            h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)  # (B, N, d_model)
+            mask = mask.to(x.device)  # (N,)
+            # CLS always valid
+            mask_with_cls = torch.cat(
+                [torch.ones(1, device=x.device, dtype=torch.bool), mask],
+                dim=0,
+            )  # (1+N,)
+
+            src_key_padding_mask = (~mask_with_cls).unsqueeze(0).expand(B, -1)  # (B,1+N) True=ignore
+            h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)
         else:
-            h = self.encoder(h)  # (B, N, d_model) - no mask
+            h = self.encoder(h)
 
-        # Attention pooling
-        scores = self.attn_pool(h).squeeze(-1)  # (B, N)
-        if mask is not None:
-            scores = scores.masked_fill((~mask).unsqueeze(0), -1e9)
-        w = torch.softmax(scores, dim=1)  # (B, N)
-        pooled = (h * w.unsqueeze(-1)).sum(dim=1)  # (B, d_model)
-
-        z = self.to_latent(pooled)  # (B, latent_dim)
+        cls_out = h[:, 0, :]       # (B, d_model)
+        z = self.to_latent(cls_out)  # (B, latent_dim)
         return z
 
     def decode(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """
         z: (B, latent_dim)
-        mask: (N,) bool (used to ignore invalid tokens inside decoder if desired)
+        mask: (N,) bool (optional, can ignore invalid tokens in decoder)
         """
         B = z.size(0)
         context = self.from_latent(z).unsqueeze(1)  # (B, 1, d_model)
 
         queries = self.residue_queries.expand(B, -1, -1)  # (B, N, d_model)
-        h = queries + context  # broadcast add
-        h = self.pos_enc(h)
+        h = queries + context
+        h = self.pos_enc(h)  # ok: positional encoding supports >= N
 
         if mask is not None:
-            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)  # (B, N) True=ignore
+            mask = mask.to(z.device)
+            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)  # (B, N)
             h = self.decoder(h, src_key_padding_mask=src_key_padding_mask)
         else:
             h = self.decoder(h)
