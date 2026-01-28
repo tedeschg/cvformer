@@ -8,7 +8,7 @@ python ../testit.py \
   --epochs 1000 \
   --batch_size 64 \
   --patience 20 \
-  --pool_type mean \
+  --pool_type attn \
   --attn_temperature 3.0 \
   --latent_bound 2.0 \
   --jacobian_lambda 0.01 \

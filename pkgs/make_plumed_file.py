@@ -12,20 +12,71 @@ def plumed_atoms(quad_0based) -> str:
     return ",".join(str(int(a) + 1) for a in quad_0based)
 
 
+def residue_key(res) -> tuple:
+    """
+    Build a stable residue identifier across different topologies.
+    Uses: chain index + PDB resSeq + insertion code + residue name.
+    """
+    # MDTraj exposes res.resSeq for PDB-style numbering when available; fallback to res.index.
+    resseq = getattr(res, "resSeq", None)
+    if resseq is None:
+        resseq = res.index
+
+    ins = getattr(res, "insertion_code", None)
+    if ins is None:
+        # some versions use res.insertionCode; others have nothing
+        ins = getattr(res, "insertionCode", "")
+    if ins is None:
+        ins = ""
+    ins = str(ins)
+
+    return (int(res.chain.index), int(resseq), ins, str(res.name))
+
+
+def build_phi_psi_maps(traj_or_top):
+    """
+    Return dicts: {residue_index_in_that_topology: quadruple} for phi and psi.
+    Needs a Trajectory (1 frame is fine). If passed a Topology, we create dummy xyz.
+    """
+    if isinstance(traj_or_top, md.Topology):
+        top = traj_or_top
+        xyz = np.zeros((1, top.n_atoms, 3), dtype=np.float32)
+        traj = md.Trajectory(xyz, top)
+    else:
+        traj = traj_or_top
+        top = traj.topology
+
+    phi_quads, _ = md.compute_phi(traj)
+    psi_quads, _ = md.compute_psi(traj)
+
+    def resid_of_quad(q):
+        # second atom is "central" residue for mdtraj phi/psi definition
+        return top.atom(int(q[1])).residue.index
+
+    phi_map = {int(resid_of_quad(q)): q for q in phi_quads}
+    psi_map = {int(resid_of_quad(q)): q for q in psi_quads}
+    return phi_map, psi_map
+
+
 def main():
     ap = argparse.ArgumentParser(
         description="Generate plumed.dat using training-aligned residue_ids from plumed_info.json "
-                    "and sin/cos(phi,psi) inputs for a TorchScript encoder."
+                    "and sin/cos(phi,psi) inputs for a TorchScript encoder, but emitting ATOMS indices "
+                    "for the actual PLUMED/MD topology."
     )
 
-    # Required
-    ap.add_argument("--top", required=True, help="Topology file used in MD (.pdb/.gro)")
+    # Required training artifacts
+    ap.add_argument("--top", required=True, help="Training topology used to export plumed_info.json (.pdb/.gro)")
     ap.add_argument("--pt", required=True, help="TorchScript encoder (.pt) exported for PLUMED")
     ap.add_argument("--info", required=True, help="plumed_info.json exported alongside the .pt")
     ap.add_argument("--out", default="plumed.dat", help="Output plumed.dat path")
 
-    # Optional: trajectory only used for topology sanity (one frame enough)
-    ap.add_argument("--traj", default=None, help="Optional trajectory file (.xtc/.dcd). If omitted loads topology only.")
+    # Optional: training trajectory only used for topology sanity (one frame enough)
+    ap.add_argument("--traj", default=None, help="Optional training trajectory (.xtc/.dcd). If omitted loads topology only.")
+
+    # NEW: topology actually used in MD/PLUMED (indices must match THIS)
+    ap.add_argument("--plumed_top", required=True, help="Topology actually used for PLUMED/MD (.pdb/.gro)")
+    ap.add_argument("--plumed_traj", default=None, help="Optional trajectory for plumed_top (.xtc/.dcd). One frame enough.")
 
     # Optional: WHOLEMOLECULES
     ap.add_argument("--whole_entity0", default=None, help="WHOLEMOLECULES ENTITY0 range, e.g. '1-272'")
@@ -66,35 +117,51 @@ def main():
         raise RuntimeError(f"plumed_info.json mismatch: mask len {len(mask)} != n_tokens {n_tokens}")
 
     if args.debug_tokens and args.debug_tokens > 0:
-        # WARNING: only for debugging; will NOT match exported model unless you exported with same n_tokens.
         residue_ids = residue_ids[: args.debug_tokens]
         mask = mask[: args.debug_tokens]
         n_tokens = len(residue_ids)
 
     # --------------------------
-    # Load a trajectory/topology (one frame enough)
+    # Load training topology (for residue_ids reference)
     # --------------------------
     if args.traj:
-        traj = md.load(args.traj, top=args.top)
+        tr_traj = md.load(args.traj, top=args.top)
     else:
-        top = md.load_topology(args.top)
-        xyz = np.zeros((1, top.n_atoms, 3), dtype=np.float32)
-        traj = md.Trajectory(xyz, top)
-
-    top = traj.topology
+        tr_top = md.load_topology(args.top)
+        xyz = np.zeros((1, tr_top.n_atoms, 3), dtype=np.float32)
+        tr_traj = md.Trajectory(xyz, tr_top)
+    tr_top = tr_traj.topology
 
     # --------------------------
-    # Build residue_index -> dihedral quadruple maps using MDTraj conventions
+    # Load plumed topology (THIS defines correct ATOMS indices)
     # --------------------------
-    phi_quads, _ = md.compute_phi(traj)  # list of quadruples (0-based atom idx)
-    psi_quads, _ = md.compute_psi(traj)
+    if args.plumed_traj:
+        pl_traj = md.load(args.plumed_traj, top=args.plumed_top)
+    else:
+        pl_top = md.load_topology(args.plumed_top)
+        xyz = np.zeros((1, pl_top.n_atoms, 3), dtype=np.float32)
+        pl_traj = md.Trajectory(xyz, pl_top)
+    pl_top = pl_traj.topology
 
-    def resid_of_quad(q):
-        # Use second atom as "central" residue (standard for phi/psi definitions)
-        return top.atom(int(q[1])).residue.index
+    # --------------------------
+    # Build mapping: training residue.index -> plumed residue.index
+    # via stable residue_key (chain,resSeq,ins,resname)
+    # --------------------------
+    train_res_by_key = {residue_key(r): r.index for r in tr_top.residues}
+    plumed_res_by_key = {residue_key(r): r.index for r in pl_top.residues}
 
-    phi_map = {int(resid_of_quad(q)): q for q in phi_quads}
-    psi_map = {int(resid_of_quad(q)): q for q in psi_quads}
+    train_to_plumed = {}
+    missing = []
+    for key, tr_residx in train_res_by_key.items():
+        if key in plumed_res_by_key:
+            train_to_plumed[int(tr_residx)] = int(plumed_res_by_key[key])
+        else:
+            missing.append(key)
+
+    # --------------------------
+    # Build phi/psi maps on PLUMED topology (correct atom indices)
+    # --------------------------
+    pl_phi_map, pl_psi_map = build_phi_psi_maps(pl_traj)
 
     # --------------------------
     # Write plumed.dat
@@ -105,21 +172,38 @@ def main():
         lines.append(f"WHOLEMOLECULES ENTITY0={args.whole_entity0}")
 
     arg_labels = []
-    input_labels_for_print = []  # optional debug
+    input_labels_for_print = []
 
-    # IMPORTANT: keep token order exactly as training (residue_ids order)
-    for t, resid in enumerate(residue_ids):
-        resid = int(resid)
-        if resid not in phi_map or resid not in psi_map:
+    for t, tr_resid in enumerate(residue_ids):
+        tr_resid = int(tr_resid)
+
+        if tr_resid not in train_to_plumed:
+            # provide a very explicit error
+            tr_res = tr_top.residue(tr_resid)
             raise RuntimeError(
-                f"Residue {resid} (token {t}) missing phi/psi quadruple in this topology. "
-                "This indicates a mismatch between training topology and MD topology."
+                "Residue from training residue_ids not found in plumed topology.\n"
+                f"  token={t}\n"
+                f"  training residue.index={tr_resid}\n"
+                f"  training key={residue_key(tr_res)}\n"
+                "This indicates a mismatch in chain/resSeq/insertion/resname between training and plumed structures."
             )
 
-        qphi = phi_map[resid]
-        qpsi = psi_map[resid]
+        pl_resid = train_to_plumed[tr_resid]
 
-        # Define torsions
+        if pl_resid not in pl_phi_map or pl_resid not in pl_psi_map:
+            pl_res = pl_top.residue(pl_resid)
+            raise RuntimeError(
+                "Mapped residue exists in plumed topology but missing phi/psi quadruple there.\n"
+                f"  token={t}\n"
+                f"  plumed residue.index={pl_resid}\n"
+                f"  plumed key={residue_key(pl_res)}\n"
+                "Often happens at termini or if backbone atoms are missing."
+            )
+
+        qphi = pl_phi_map[pl_resid]
+        qpsi = pl_psi_map[pl_resid]
+
+        # Define torsions (using PLUMED topology atom indices!)
         lab_phi = f"phi{t}"
         lab_psi = f"psi{t}"
         lines.append(f"{lab_phi}: TORSION ATOMS={plumed_atoms(qphi)}")
@@ -131,7 +215,6 @@ def main():
         lab_spsi = f"spsi{t}"
         lab_cpsi = f"cpsi{t}"
 
-        # sin/cos are non-periodic variables in [-1,1]
         lines.append(f"{lab_sphi}: MATHEVAL ARG={lab_phi} FUNC=sin(x) PERIODIC=NO")
         lines.append(f"{lab_cphi}: MATHEVAL ARG={lab_phi} FUNC=cos(x) PERIODIC=NO")
         lines.append(f"{lab_spsi}: MATHEVAL ARG={lab_psi} FUNC=sin(x) PERIODIC=NO")
@@ -142,19 +225,14 @@ def main():
         if args.print_inputs and t < 5:
             input_labels_for_print.extend([lab_sphi, lab_cphi, lab_spsi, lab_cpsi])
 
-    # Validate 4N args
     expected = 4 * n_tokens
     if len(arg_labels) != expected:
         raise RuntimeError(f"Internal error: built {len(arg_labels)} ARG labels, expected {expected} (4*n_tokens).")
 
-    # Torch model expects ARG=... (not ATOMS=...)
     lines.append(f"model: PYTORCH_MODEL FILE={args.pt} ARG={','.join(arg_labels)}")
 
-    # Optional: apply tanh bounding to CVs before metadynamics
     if args.cv_tanh:
         sc = float(args.cv_tanh_scale)
-        # Output node names: model.node-0, model.node-1, ...
-        # For latent_dim>2, user can extend later. Here we do first two as usual for METAD.
         if latent_dim < 2:
             raise RuntimeError(f"latent_dim={latent_dim}, cannot define cv0/cv1.")
         lines.append(f"cv0: MATHEVAL ARG=model.node-0 FUNC=tanh(x/{sc}) PERIODIC=NO")
@@ -163,7 +241,6 @@ def main():
     else:
         cv_arg0, cv_arg1 = "model.node-0", "model.node-1"
 
-    # METAD from latents range
     if args.latents:
         lat = np.load(args.latents)
         if lat.ndim != 2 or lat.shape[1] < 2:
@@ -172,10 +249,7 @@ def main():
         lat2 = lat[:, :2]
         lmin = np.min(lat2, axis=0)
         lmax = np.max(lat2, axis=0)
-        llen = lmax - lmin
-
-        # Guard against degenerate ranges
-        llen = np.maximum(llen, 1e-6)
+        llen = np.maximum(lmax - lmin, 1e-6)
 
         sigma = llen / float(args.sigma_div)
         grid_min = lmin - llen * float(args.grid_margin)
@@ -190,7 +264,7 @@ def main():
             f"GRID_MAX={grid_max[0]},{grid_max[1]} "
             f"FILE={args.hills}"
         )
-        # Print
+
         if args.print_inputs and input_labels_for_print:
             lines.append(
                 f"PRINT FILE=COLVAR ARG={cv_arg0},{cv_arg1},metad.bias,"
@@ -208,12 +282,13 @@ def main():
 
     Path(args.out).write_text("\n".join(lines) + "\n")
 
-    # Summary
     print(f"Wrote {args.out}")
     print(f"  Tokens: {n_tokens}  (expect model input ARGs={4*n_tokens})")
     print(f"  Latent dim: {latent_dim}  (using first two CVs)")
     print(f"  TorchScript: {args.pt}")
     print(f"  Info: {args.info}")
+    print(f"  Training top: {args.top}")
+    print(f"  Plumed top:   {args.plumed_top}")
     if args.cv_tanh:
         print(f"  CV bounding: tanh(x/{args.cv_tanh_scale}) enabled")
     if args.latents:
@@ -221,7 +296,6 @@ def main():
     else:
         print("  METAD: not written (no --latents)")
 
-    # Mask sanity
     n_valid = int(mask.sum())
     if n_valid != n_tokens:
         print(f"  Note: mask has {n_valid}/{n_tokens} valid tokens (model export uses this mask).")
