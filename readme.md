@@ -17,17 +17,17 @@ mamba activate cvformer
 
 ```
 cvformer/
-├── pkgs/                          # Modular package
-│   ├── model.py                   # Model architecture
-│   ├── train.py                   # Training loops and metrics
-│   └── utils.py                   # Data utilities and preprocessing
-├── testit.py                      # Main training script
-├── environment.yml                # Conda/mamba dependencies
-├── test9/                         # Example output
-│   ├── dihedral_encoder.pt        # Saved encoder model
-│   └── latent.txt                 # Extracted latents
-├── .gitignore                     # Files to ignore
-└── readme.md                      # This file
+├── pkgs/                          # Core package modules
+│   ├── model.py                   # Transformer architecture & loss
+│   ├── train.py                   # Training loops & metrics
+│   ├── utils.py                   # Preprocessing & alignment
+│   ├── plumed_export.py           # TorchScript export logic
+│   └── make_plumed_file.py        # Utility to generate plumed.dat
+├── testit.py                      # Main training & evaluation entry point
+├── environment.yml                # Environment dependencies
+├── analyze/                       # Analysis notebooks & plots
+├── test02/                        # Example data & test runs
+└── readme.md                      # This documentation
 ```
 
 ---
@@ -35,117 +35,79 @@ cvformer/
 ## Package Contents
 
 ### `pkgs/model.py`
-Contains the Transformer Autoencoder architecture:
+Core architecture:
+- **`DihedralTransformerAE`**: Transformer Autoencoder with attention pooling and sin/cos normalization.
+- **`SinusoidalPositionalEncoding`**: Fixed positional embeddings.
+- **`dihedral_loss()`**: Mask-aware MSE on unit-circle projections.
+- **`WarmupCosineScheduler`**: Learning rate scheduling.
 
-- **`DihedralTransformerAE`**: Main model class
-  - Transformer encoder with attention pooling
-  - Latent bottleneck (default 2D)
-  - Transformer decoder with learned per-residue queries
-  - Sin/cos normalization to unit circle
+### `pkgs/plumed_export.py`
+Handles model production:
+- **`export_plumed_encoder()`**: Traces the encoder into TorchScript (`.pt`) and generates `plumed_info.json` with metadata (mask, residue IDs, input format).
+- **`FlattenEncoderPlumed`**: Internal wrapper that ensures PLUMED inputs are correctly reshaped and masked.
 
-- **`SinusoidalPositionalEncoding`**: Sinusoidal positional encoding (non-learnable)
+### `pkgs/make_plumed_file.py`
+Automation tool:
+- Generates a ready-to-use `plumed.dat` by mapping training residues to the target MD topology.
+- Supports METAD block generation using training latent ranges.
 
-- **`dihedral_loss()`**: MSE loss on sin/cos representation with masking support
-
-- **`WarmupCosineScheduler`**: Linear warmup + cosine decay scheduler
-
-### `pkgs/train.py`
-Functions for training, validation, and extraction:
-
-- **`train_epoch()`**: Single epoch training with gradient clipping
-- **`validate()`**: Simple validation (loss only)
-- **`validate_with_metrics()`**: Validation with angular metrics (MAE φ/ψ)
-- **`angular_mae()`**: Circular Mean Absolute Error for dihedral angles
-- **`extract_latents()`**: Extract latent representations from full dataset
-
-### `pkgs/utils.py`
-Data preprocessing and management utilities:
-
-- **`angles_to_sincos()`**: Convert angles → sin/cos representation
-- **`sincos_to_angle_torch()`**: Convert sin/cos → angles (atan2)
-- **`circular_diff()`**: Circular difference between angles (wrap [-π, π])
-- **`compute_aligned_phi_psi()`**: Robust φ/ψ alignment by residue from MDTraj
-- **`DihedralDataset`**: PyTorch Dataset for dihedral angles
-
-### `testit.py`
-Main integrated script for:
-
-1. **Trajectory loading** with MDTraj
-2. **Robust preprocessing** of φ/ψ angles (per-residue alignment)
-3. **Training** with temporal split, early stopping, warmup+cosine scheduler
-4. **Validation** with angular metrics (MAE)
-5. **Latent extraction** from full dataset
-6. **PLUMED EXPORT**:
-   - `FlattenEncoder` class (wrapper for flat PLUMED input)
-   - TorchScript tracing → `dihedral_encoder_plumed.pt`
-   - JSON metadata (`plumed_info.json`) with residue and dimension info
+### `pkgs/utils.py` & `pkgs/train.py`
+- **Robust alignment**: Ensures token $i$ consistently represents the same residue for both $\phi$ and $\psi$.
+- **Circular Metrics**: Angular MAE for validation.
+- **Temporal Split**: Default 90/10 split to prevent data leakage in MD trajectories.
 
 ---
 
 ## Usage
 
-### Basic Training
+### 1. Training
 ```bash
 python testit.py \
   --trajectory traj.xtc \
   --topology topol.pdb \
   --output_dir output \
   --latent_dim 2 \
-  --epochs 1000 \
-  --batch_size 64
+  --epochs 1000
 ```
 
-### Generated Output
+### 2. PLUMED Setup
+After training, use the utility script to generate the `plumed.dat`:
+```bash
+python pkgs/make_plumed_file.py \
+  --top training_top.pdb \
+  --plumed_top md_top.pdb \
+  --pt output/dihedral_encoder_plumed.pt \
+  --info output/plumed_info.json \
+  --latents output/latents.npy \
+  --out plumed.dat
+```
+
+---
+
+## Generated Output
 In the `output/` directory:
-
-- **Model files**:
-  - `best_model.pt` - Full checkpoint of best model
-  - `dihedral_encoder_plumed.pt` - **Encoder for PLUMED** (TorchScript)
-  - `plumed_info.json` - Metadata for PLUMED integration
-
-- **Latents**:
-  - `latents.npy` / `latents.txt` - Latent representations (n_frames × latent_dim)
-  - `token_residue_ids.txt` - Mapping token → topology residue index
-
-- **Training history**:
-  - `train_losses.txt`, `val_losses.txt`
-  - `mae_phi.txt`, `mae_psi.txt`
-  - `config.txt` - Training configuration
+- `best_model.pt`: Full training checkpoint.
+- `dihedral_encoder_plumed.pt`: Optimized TorchScript model for PLUMED.
+- `plumed_info.json`: Metadata (residue mapping, mask, notes).
+- `latents.npy/txt`: Extracted CVs for the input trajectory.
+- `token_residue_ids.txt`: Mapping of model tokens to topology residue indices.
 
 ---
 
 ## 🔧 PLUMED Integration
 
-The `dihedral_encoder_plumed.pt` file can be used in PLUMED with the PyTorch module:
+The exported model integrates with PLUMED via the `PYTORCH_MODEL` module. The input expected is a flat array of:
+`[sin(φ₀), cos(φ₀), sin(ψ₀), cos(ψ₀), sin(φ₁), ...]`
 
-```plumed
-# Compute φ/ψ angles
-phi1: TORSION ATOMS=...
-psi1: TORSION ATOMS=...
-...
-
-# Use encoder as CV (requires PLUMED-PyTorch interface)
-# Input: flat vector [sin(φ₁), cos(φ₁), sin(ψ₁), cos(ψ₁), ...]
-# Output: latent_dim CVs
-```
-
-The model expects:
-- **Input shape**: `(batch, 4 × n_tokens)` flat array
-- **Output shape**: `(batch, latent_dim)`
-- Corresponding residues are listed in `token_residue_ids.txt`
+The `make_plumed_file.py` script automates the creation of all necessary `TORSION` and `MATHEVAL` definitions required to feed the model correctly.
 
 ---
 
 ## Key Features
-
-✅ Robust per-residue φ/ψ alignment (handles terminals)
-✅ Sin/cos representation with unit circle normalization
-✅ Temporal split (prevents data leakage)
-✅ Warmup + cosine decay scheduler
-✅ Early stopping with patience
-✅ Angular metrics (circular MAE)
-✅ **TorchScript export for PLUMED**
-✅ Gradient clipping, dropout, weight decay
+- ✅ **Mask-Aware Inference**: Automatically ignores residues without valid $\phi/\psi$ pairs (e.g., termini).
+- ✅ **Unit Circle Projection**: Prevents numerical instability by normalizing sin/cos outputs.
+- ✅ **Topology Mapping**: Safely maps training residue indices to different MD topologies.
+- ✅ **Metadynamics Ready**: Calculates SIGMA and GRID parameters from training latent distributions.
 
 ---
 

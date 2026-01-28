@@ -30,7 +30,7 @@ def angular_mae(x_hat: torch.Tensor, x: torch.Tensor, mask: torch.Tensor | None 
         mae_phi = dphi.mean()
         mae_psi = dpsi.mean()
 
-    return mae_phi.item(), mae_psi.item()
+    return float(mae_phi), float(mae_psi)
 
 
 # -----------------------------

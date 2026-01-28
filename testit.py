@@ -24,6 +24,8 @@ from torch.utils.data import DataLoader, Subset
 from pkgs.utils import angles_to_sincos, compute_aligned_phi_psi, DihedralDataset
 from pkgs.model import DihedralTransformerAE, WarmupCosineScheduler
 from pkgs.train import validate_with_metrics, train_epoch, extract_latents
+from pkgs.plumed_export import export_plumed_encoder
+
 # -----------------------------
 # Reproducibility
 # -----------------------------
@@ -216,43 +218,21 @@ def main(args):
     print("Exporting model for PLUMED integration...")
     print(f"{'=' * 60}")
 
-    class FlattenEncoder(nn.Module):
-        def __init__(self, encoder):
-            super().__init__()
-            self.encoder = encoder
-            self.n_tokens = encoder.n_tokens
+    pt_path, info_path = export_plumed_encoder(
+        model=model,
+        output_dir=output_dir,
+        n_tokens=n_tokens,
+        latent_dim=args.latent_dim,
+        residue_ids=residue_ids,
+        mask_np=np.asarray(mask_np, dtype=bool),
+        pt_name="dihedral_encoder_plumed.pt",
+        info_name="plumed_info.json",
+    )
 
-        def forward(self, x_flat):
-            # x_flat: (B, 4*N) = [sphi0,cphi0,spsi0,cpsi0, sphi1,cphi1,spsi1,cpsi1, ...]
-            B = x_flat.shape[0]
-            x = x_flat.view(B, self.n_tokens, 4)
-            z = self.encoder.encode(x, mask=None)
-            return z
-
-    flat_encoder = FlattenEncoder(model)
-    flat_encoder.eval()
-    scripted_encoder = torch.jit.script(flat_encoder)
-    scripted_encoder.save(output_dir / "dihedral_encoder_plumed.pt")
-
-    print(f"✓ Saved PLUMED-compatible encoder: {output_dir / 'dihedral_encoder_plumed.pt'}")
+    print(f"✓ Saved PLUMED-compatible encoder: {pt_path}")
     print(f"  Input shape: (batch, {4 * n_tokens}) = flat sin/cos for {n_tokens} residues")
     print(f"  Output shape: (batch, {args.latent_dim})")
-
-
-    # Save metadata for PLUMED integration
-    import json
-    plumed_info = {
-        "n_tokens": int(n_tokens),
-        "latent_dim": int(args.latent_dim),
-        "residue_ids": residue_ids.tolist(),
-        "input_shape": [4 * n_tokens],
-        "output_shape": [args.latent_dim],
-        "notes": "Input: flat array [sin(phi_0), cos(phi_0), sin(psi_0), cos(psi_0), sin(phi_1), ...] for residues in residue_ids"
-    }
-    with open(output_dir / "plumed_info.json", "w") as f:
-        json.dump(plumed_info, f, indent=2)
-
-    print(f"✓ Saved PLUMED metadata: {output_dir / 'plumed_info.json'}")
+    print(f"✓ Saved PLUMED metadata: {info_path}")
 
     print(f"\n{'=' * 60}")
     print(f"Done. Output dir: {output_dir}")
