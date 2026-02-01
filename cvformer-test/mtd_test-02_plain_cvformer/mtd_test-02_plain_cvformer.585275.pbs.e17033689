@@ -1,0 +1,47 @@
+                :-) GROMACS - gmx grompp, 2024-plumed_2.10.0 (-:
+
+Executable:   /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi
+Data prefix:  /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs
+Working dir:  /scratch.ssd/tedeschg/job_17033689.pbs-m1
+Command line:
+  gmx_mpi grompp -f /storage/brno2/home/tedeschg/prj/cvformer/prepare/md_files/md.mdp -c /storage/brno2/home/tedeschg/prj/cvformer/prepare/npt.gro -t /storage/brno2/home/tedeschg/prj/cvformer/prepare/npt.cpt -p /storage/brno2/home/tedeschg/prj/cvformer/prepare/topol.top -o mtd
+
+Ignoring obsolete mdp entry 'ns_type'
+Generating 1-4 interactions: fudge = 0.5
+Number of degrees of freedom in T-Coupling group Protein is 687.87
+Number of degrees of freedom in T-Coupling group non-Protein is 15234.13
+Last frame         -1 time  100.000   
+
+GROMACS reminds you: "The plural of regex is regrets" (Steve McCarthy (on Twitter))
+
+                :-) GROMACS - gmx mdrun, 2024-plumed_2.10.0 (-:
+
+Executable:   /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi
+Data prefix:  /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs
+Working dir:  /scratch.ssd/tedeschg/job_17033689.pbs-m1
+Command line:
+  gmx_mpi mdrun -deffnm mtd -plumed plumed.dat
+
+Reading file mtd.tpr, VERSION 2024-plumed_2.10.0 (single precision)
+Changing nstlist from 10 to 50, rlist from 1 to 1.11
+
+Using 1 MPI process
+
+Non-default thread affinity set, disabling internal thread affinity
+
+Using 12 OpenMP threads 
+
+starting mdrun 'S  C  A  M  O  R  G in water'
+5000000 steps,  10000.0 ps.
+
+Writing final coordinates.
+
+               Core t (s)   Wall t (s)        (%)
+       Time:   451537.839    37628.153     1200.0
+                         10h27:08
+                 (ns/day)    (hour/ns)
+Performance:       22.962        1.045
+
+GROMACS reminds you: "Does All This Money Really Have To Go To Charity ?" (Rick)
+
+rm: cannot remove '/scratch.ssd/tedeschg/job_17033689.pbs-m1': Permission denied

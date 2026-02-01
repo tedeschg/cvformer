@@ -1,7 +1,7 @@
 python /home/tedeschg/prj/cvformer/pkgs/make_plumed_file.py \
   --top /home/tedeschg/prj/cvformer/test02/2JOF-0-proteinNoH.pdb \
   --traj /home/tedeschg/prj/cvformer/test02/traj_skip100NoH.xtc \
-  --plumed_top /home/tedeschg/prj/cvformer/npt.gro \
+  --plumed_top /home/tedeschg/prj/cvformer/test02/npt.gro \
   --pt /home/tedeschg/prj/cvformer/test02/output/dihedral_encoder_plumed.pt \
   --info /home/tedeschg/prj/cvformer/test02/output/plumed_info.json \
   --latents /home/tedeschg/prj/cvformer/test02/output/latents.npy \

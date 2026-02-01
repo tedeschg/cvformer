@@ -1,8 +1,5 @@
 # Folders
-/test/*
-/test02/*
-/test02/output/*
-/analyze/*
+.cvformer-tes/
 __pycache__/
 .venv/
 .idea/
@@ -12,15 +9,4 @@ __pycache__/
 .env
 
 # Include specific files
-
-
-!/analyze/
-!/analyze/cv_analysis-by-psi.png
-
-!/test02/
-!/test02/runit.sh
-!/test02/output/
-!/test02/output/plumed.dat
-!/test02/output/config.txt
-!/test02/output/dihedral_encoder_plumed.pt
 

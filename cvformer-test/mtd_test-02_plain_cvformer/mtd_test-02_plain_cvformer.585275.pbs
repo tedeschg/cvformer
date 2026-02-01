@@ -1,0 +1,14 @@
+#!/bin/sh
+#PBS -q gpu
+#PBS -l walltime=24:00:00
+#PBS -l select=1:ngpus=1:ncpus=12:mem=64gb:scratch_local=100gb
+export LIBTORCH="/storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/plumed/libtorch"
+export PLUMED_LIB="/storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/plumed/lib"
+export LD_LIBRARY_PATH="$PLUMED_LIB:$LIBTORCH/lib:$LD_LIBRARY_PATH"
+trap 'rm -rf "$SCRATCHDIR"' TERM EXIT
+cp -r "$PBS_O_WORKDIR"/* "$SCRATCHDIR"/ || exit 1
+cd "$SCRATCHDIR" || exit 2
+export OMP_NUM_THREADS=12
+/storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi grompp -f /storage/brno2/home/tedeschg/prj/cvformer/prepare/md_files/md.mdp -c /storage/brno2/home/tedeschg/prj/cvformer/prepare/npt.gro -t /storage/brno2/home/tedeschg/prj/cvformer/prepare/npt.cpt -p /storage/brno2/home/tedeschg/prj/cvformer/prepare/topol.top -o mtd
+/storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi mdrun -deffnm mtd -plumed plumed.dat
+cp -r * "$PBS_O_WORKDIR"/ || { trap - TERM EXIT; echo "crashed at $(hostname)" >&2; exit 1; }
