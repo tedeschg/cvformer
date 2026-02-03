@@ -9,4 +9,4 @@ __pycache__/
 .env
 
 # Include specific files
-
+!cvformer-test/analyze
