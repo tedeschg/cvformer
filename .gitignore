@@ -5,7 +5,7 @@ __pycache__/
 .idea/
 
 # Files
-*.pyc
+*.pycgit
 .env
 
 # Include specific files
