@@ -3,6 +3,61 @@ import torch.nn as nn
 import math
 
 # -----------------------------
+# Latent prior sampling
+# -----------------------------
+def sample_prior(
+    batch_size: int,
+    latent_dim: int,
+    kind: str = "gaussian",
+    device: torch.device | str = "cpu",
+) -> torch.Tensor:
+    """
+    kind:
+      - "gaussian": N(0,1)
+      - "uniform":  U(-1,1)
+    """
+    if kind == "gaussian":
+        return torch.randn(batch_size, latent_dim, device=device)
+    elif kind == "uniform":
+        return 2.0 * torch.rand(batch_size, latent_dim, device=device) - 1.0
+    raise ValueError(f"Unknown prior kind: {kind}")
+
+
+# -----------------------------
+# Critic on latent space (WGAN-GP)
+# -----------------------------
+class LatentCritic(nn.Module):
+    """
+    Simple MLP critic over z.
+    Outputs scores (no sigmoid).
+    """
+    def __init__(self, latent_dim: int, hidden: int = 128, depth: int = 3, dropout: float = 0.1):
+        super().__init__()
+        if depth < 2:
+            raise ValueError("depth must be >= 2")
+
+        layers: list[nn.Module] = []
+        d_in = latent_dim
+        for _ in range(depth - 1):
+            layers += [
+                nn.Linear(d_in, hidden),
+                nn.GELU(),
+                nn.Dropout(dropout),
+            ]
+            d_in = hidden
+
+        layers += [nn.Linear(d_in, 1)]
+        self.net = nn.Sequential(*layers)
+
+        for p in self.parameters():
+            if p.dim() > 1:
+                nn.init.xavier_uniform_(p)
+
+    def forward(self, z: torch.Tensor) -> torch.Tensor:
+        return self.net(z).squeeze(-1)  # (B,)
+
+
+# -----------------------------
 # Model
 # -----------------------------
 class DihedralTransformerAE(nn.Module):
@@ -16,11 +71,16 @@ class DihedralTransformerAE(nn.Module):
         dim_feedforward: int = 256,
         dropout: float = 0.1,
         latent_dim: int = 2,
+        latent_activation: str = "linear",  # "linear" | "tanh"
     ):
         super().__init__()
         self.n_tokens = n_tokens
         self.d_model = d_model
         self.latent_dim = latent_dim
+
+        if latent_activation not in ("linear", "tanh"):
+            raise ValueError("latent_activation must be 'linear' or 'tanh'")
+        self.latent_activation = latent_activation
 
         self.input_proj = nn.Linear(4, d_model)
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=n_tokens)
@@ -100,10 +160,6 @@ class DihedralTransformerAE(nn.Module):
         return torch.cat([phi, psi], dim=-1)
 
     def _encode_core(self, x: torch.Tensor, mask: torch.Tensor | None = None):
-        """
-        Internal encoder core returning BOTH (z, w).
-        This is used by encode() and encode_with_attention().
-        """
         B, N, _ = x.shape
 
         h = self.input_proj(x)
@@ -112,9 +168,9 @@ class DihedralTransformerAE(nn.Module):
 
         if mask is not None:
             src_key_padding_mask = (~mask).expand(B, -1)  # (B, N) True=ignore
-            h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)  # (B, N, d_model)
+            h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)
         else:
-            h = self.encoder(h)  # (B, N, d_model)
+            h = self.encoder(h)
 
         scores = self.attn_pool(h).squeeze(-1)  # (B, N)
         if mask is not None:
@@ -123,28 +179,21 @@ class DihedralTransformerAE(nn.Module):
         w = torch.softmax(scores, dim=1)  # (B, N)
         pooled = (h * w.unsqueeze(-1)).sum(dim=1)  # (B, d_model)
         z = self.to_latent(pooled)  # (B, latent_dim)
+
+        if self.latent_activation == "tanh":
+            z = torch.tanh(z)
+
         return z, w
 
     def encode(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        TorchScript-friendly: ALWAYS returns only z (Tensor).
-        """
         z, _ = self._encode_core(x, mask)
         return z
 
     @torch.jit.ignore
     def encode_with_attention(self, x: torch.Tensor, mask: torch.Tensor | None = None):
-        """
-        Python-only helper: returns (z, w) for analysis.
-        Marked as jit.ignore so TorchScript won't try to compile it.
-        """
         return self._encode_core(x, mask)
 
     def decode(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
-        """
-        z: (B, latent_dim)
-        mask: (N,) bool (used to ignore invalid tokens inside decoder if desired)
-        """
         B = z.size(0)
         context = self.from_latent(z).unsqueeze(1)  # (B, 1, d_model)
 
@@ -153,7 +202,7 @@ class DihedralTransformerAE(nn.Module):
         h = self.pos_enc(h)
 
         if mask is not None:
-            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)  # (B, N) True=ignore
+            src_key_padding_mask = (~mask).unsqueeze(0).expand(B, -1)  # (B, N)
             h = self.decoder(h, src_key_padding_mask=src_key_padding_mask)
         else:
             h = self.decoder(h)
@@ -163,9 +212,6 @@ class DihedralTransformerAE(nn.Module):
         return x_hat
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
-        """
-        TorchScript-friendly: fixed return type (x_hat, z).
-        """
         z = self.encode(x, mask)
         x_hat = self.decode(z, mask)
         return x_hat, z
@@ -175,9 +221,6 @@ class DihedralTransformerAE(nn.Module):
 # Positional Encoding
 # -----------------------------
 class SinusoidalPositionalEncoding(nn.Module):
-    """
-    Standard sinusoidal positional encoding (buffer, no learned params).
-    """
     def __init__(self, d_model: int, max_len: int = 2048):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
@@ -215,10 +258,6 @@ def dihedral_loss(x_hat: torch.Tensor, x: torch.Tensor, mask: torch.Tensor | Non
 # Scheduler: warmup + cosine
 # -----------------------------
 class WarmupCosineScheduler:
-    """
-    Per-step scheduler.
-    Warmup linearly to base_lr, then cosine decay to base_lr*min_lr_ratio.
-    """
     def __init__(self, optimizer, warmup_steps: int, total_steps: int, min_lr_ratio: float = 0.01):
         self.optimizer = optimizer
         self.warmup_steps = int(max(0, warmup_steps))
@@ -238,14 +277,11 @@ class WarmupCosineScheduler:
             if self.warmup_steps > 0 and self.step_num <= self.warmup_steps:
                 lr = base_lr * (self.step_num / self.warmup_steps)
             else:
-                progress = (self.step_num - self.warmup_steps) / denom
-                progress = float(min(max(progress, 0.0), 1.0))
-
-                cosine = 0.5 * (1.0 + math.cos(math.pi * progress))
-                lr_min = base_lr * self.min_lr_ratio
-                lr = lr_min + (base_lr - lr_min) * cosine
+                t = min(1.0, (self.step_num - self.warmup_steps) / denom)
+                cosine = 0.5 * (1.0 + math.cos(math.pi * t))
+                lr = base_lr * (self.min_lr_ratio + (1.0 - self.min_lr_ratio) * cosine)
 
             pg["lr"] = lr
 
     def get_last_lr(self):
-        return [self.optimizer.param_groups[0]["lr"]]
+        return [pg["lr"] for pg in self.optimizer.param_groups]
