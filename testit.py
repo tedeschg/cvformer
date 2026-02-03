@@ -1,5 +1,5 @@
 # ==========================================================
-# Dihedral Transformer Autoencoder - VERSION 2.2 (REWRITE)
+# Dihedral Transformer Autoencoder - VERSION 0.1
 # ==========================================================
 # Fixes & upgrades applied:
 # - Robust phi/psi alignment by residue using mdtraj phi_idx/psi_idx
@@ -9,6 +9,7 @@
 # - Warmup + cosine scheduler with safety guards and clamped progress
 # - Validation adds circular angular MAE for phi/psi
 # - Saves latents as .npy and .txt (+ residue id mapping)
+# - NEW: Extract attention pooling weights w per frame and compute per-residue statistics
 # ==========================================================
 
 import math
@@ -23,7 +24,7 @@ from torch.utils.data import DataLoader, Subset
 
 from pkgs.utils import angles_to_sincos, compute_aligned_phi_psi, DihedralDataset
 from pkgs.model import DihedralTransformerAE, WarmupCosineScheduler
-from pkgs.train import validate_with_metrics, train_epoch, extract_latents
+from pkgs.train import validate_with_metrics, train_epoch, extract_latents, extract_attention_weights
 from pkgs.plumed_export import export_plumed_encoder
 
 # -----------------------------
@@ -210,6 +211,42 @@ def main(args):
     print(f"  latents.npy / latents.txt  (shape={latents.shape})")
     print(f"  token_residue_ids.txt      (len={len(residue_ids)})")
     print(f"  training histories         (train/val/mae_phi/mae_psi)")
+
+    # =============================
+    # NEW: ATTENTION WEIGHTS EXPORT
+    # =============================
+    print(f"\n{'=' * 60}")
+    print("Extracting attention pooling weights w per frame...")
+    print(f"{'=' * 60}")
+
+    W = extract_attention_weights(model, full_loader, device, mask_t)  # (n_frames, n_tokens)
+
+    w_mean = W.mean(axis=0)              # (n_tokens,)
+    w_median = np.median(W, axis=0)      # (n_tokens,)
+
+    np.save(output_dir / "attn_weights.npy", W)
+    np.savetxt(output_dir / "attn_weights_mean.txt", w_mean)
+    np.savetxt(output_dir / "attn_weights_median.txt", w_median)
+
+    attn_table = np.column_stack([residue_ids.astype(int), w_mean, w_median])
+    np.savetxt(
+        output_dir / "attn_importance_by_residue.txt",
+        attn_table,
+        header="residue_id w_mean w_median",
+        fmt=["%d", "%.8e", "%.8e"],
+    )
+
+    print(f"Saved attention outputs:")
+    print(f"  attn_weights.npy                 (shape={W.shape})")
+    print(f"  attn_weights_mean.txt            (shape={w_mean.shape})")
+    print(f"  attn_weights_median.txt          (shape={w_median.shape})")
+    print(f"  attn_importance_by_residue.txt   (residue_id, mean, median)")
+
+    topk = min(20, len(residue_ids))
+    idx = np.argsort(-w_mean)[:topk]
+    print("\nTop residues by MEAN attention weight:")
+    for r, m, med in zip(residue_ids[idx], w_mean[idx], w_median[idx]):
+        print(f"  residue {int(r):4d} | mean={m:.6e} | median={med:.6e}")
 
     # =============================
     # PLUMED EXPORT

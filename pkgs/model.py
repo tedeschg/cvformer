@@ -1,6 +1,7 @@
 import torch
 import torch.nn as nn
 import math
+
 # -----------------------------
 # Model
 # -----------------------------
@@ -32,11 +33,11 @@ class DihedralTransformerAE(nn.Module):
             dropout=dropout,
             batch_first=True,
             norm_first=True,
-            activation='gelu'
+            activation="gelu",
         )
         self.encoder = nn.TransformerEncoder(enc_layer, num_layers=num_encoder_layers)
 
-        # Attention pooling (more expressive than mean pooling)
+        # Attention pooling
         self.attn_pool = nn.Sequential(
             nn.Linear(d_model, d_model),
             nn.Tanh(),
@@ -69,7 +70,7 @@ class DihedralTransformerAE(nn.Module):
             dropout=dropout,
             batch_first=True,
             norm_first=True,
-            activation="gelu"
+            activation="gelu",
         )
         self.decoder = nn.TransformerEncoder(dec_layer, num_layers=num_decoder_layers)
 
@@ -98,12 +99,13 @@ class DihedralTransformerAE(nn.Module):
         psi = psi / (psi.norm(p=2, dim=-1, keepdim=True) + eps)
         return torch.cat([phi, psi], dim=-1)
 
-    def encode(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+    def _encode_core(self, x: torch.Tensor, mask: torch.Tensor | None = None):
         """
-        x: (B, N, 4)
-        mask: (N,) bool True=valid, False=ignore
+        Internal encoder core returning BOTH (z, w).
+        This is used by encode() and encode_with_attention().
         """
         B, N, _ = x.shape
+
         h = self.input_proj(x)
         h = self.pos_enc(h)
         h = self.input_norm(h)
@@ -112,17 +114,31 @@ class DihedralTransformerAE(nn.Module):
             src_key_padding_mask = (~mask).expand(B, -1)  # (B, N) True=ignore
             h = self.encoder(h, src_key_padding_mask=src_key_padding_mask)  # (B, N, d_model)
         else:
-            h = self.encoder(h)  # (B, N, d_model) - no mask
+            h = self.encoder(h)  # (B, N, d_model)
 
-        # Attention pooling
         scores = self.attn_pool(h).squeeze(-1)  # (B, N)
         if mask is not None:
             scores = scores.masked_fill((~mask).unsqueeze(0), -1e9)
+
         w = torch.softmax(scores, dim=1)  # (B, N)
         pooled = (h * w.unsqueeze(-1)).sum(dim=1)  # (B, d_model)
-
         z = self.to_latent(pooled)  # (B, latent_dim)
+        return z, w
+
+    def encode(self, x: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
+        """
+        TorchScript-friendly: ALWAYS returns only z (Tensor).
+        """
+        z, _ = self._encode_core(x, mask)
         return z
+
+    @torch.jit.ignore
+    def encode_with_attention(self, x: torch.Tensor, mask: torch.Tensor | None = None):
+        """
+        Python-only helper: returns (z, w) for analysis.
+        Marked as jit.ignore so TorchScript won't try to compile it.
+        """
+        return self._encode_core(x, mask)
 
     def decode(self, z: torch.Tensor, mask: torch.Tensor | None = None) -> torch.Tensor:
         """
@@ -133,7 +149,7 @@ class DihedralTransformerAE(nn.Module):
         context = self.from_latent(z).unsqueeze(1)  # (B, 1, d_model)
 
         queries = self.residue_queries.expand(B, -1, -1)  # (B, N, d_model)
-        h = queries + context  # broadcast add
+        h = queries + context
         h = self.pos_enc(h)
 
         if mask is not None:
@@ -147,6 +163,9 @@ class DihedralTransformerAE(nn.Module):
         return x_hat
 
     def forward(self, x: torch.Tensor, mask: torch.Tensor | None = None):
+        """
+        TorchScript-friendly: fixed return type (x_hat, z).
+        """
         z = self.encode(x, mask)
         x_hat = self.decode(z, mask)
         return x_hat, z
@@ -171,7 +190,6 @@ class SinusoidalPositionalEncoding(nn.Module):
         self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: (B, L, d_model)
         return x + self.pe[:, : x.size(1), :]
 
 
@@ -212,7 +230,6 @@ class WarmupCosineScheduler:
 
     def step(self):
         self.step_num += 1
-
         denom = max(1, self.total_steps - self.warmup_steps)
 
         for i, pg in enumerate(self.optimizer.param_groups):

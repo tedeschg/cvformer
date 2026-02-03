@@ -2,6 +2,7 @@ import torch
 
 from pkgs.utils import sincos_to_angle_torch, circular_diff
 from pkgs.model import dihedral_loss
+
 # -----------------------------
 # Metrics (angular MAE)
 # -----------------------------
@@ -105,3 +106,17 @@ def extract_latents(model, loader, device, mask):
         latents.append(z.cpu())
     return torch.cat(latents, dim=0).numpy()
 
+
+@torch.no_grad()
+def extract_attention_weights(model, loader, device, mask):
+    """
+    Returns:
+      W: (n_frames, n_tokens) attention pooling weights per frame (sum=1 per frame over valid tokens).
+    """
+    model.eval()
+    all_w = []
+    for batch in loader:
+        batch = batch.to(device)
+        _, w = model.encode_with_attention(batch, mask)
+        all_w.append(w.cpu())
+    return torch.cat(all_w, dim=0).numpy()
