@@ -243,9 +243,19 @@ def main(args):
     print(f"Saved attention weights: attn_w.npy shape={W.shape}")
 
     if args.export_plumed:
-        out_plumed = output_dir / "plumed_encoder.pt"
-        export_plumed_encoder(model=model, out_path=str(out_plumed), mask_np=mask_np)
-        print(f"\nExported TorchScript encoder for PLUMED: {out_plumed}")
+        pt_path, info_path = export_plumed_encoder(
+            model=model,
+            output_dir=output_dir,
+            n_tokens=n_tokens,
+            latent_dim=args.latent_dim,
+            residue_ids=residue_ids,
+            mask_np=mask_np,
+            pt_name="dihedral_encoder_plumed.pt",
+            info_name="plumed_info.json",
+        )
+        print(f"\nExported TorchScript encoder for PLUMED:")
+        print(f"  {pt_path}")
+        print(f"  {info_path}")
 
 
 def build_parser():
