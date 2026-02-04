@@ -1,31 +1,38 @@
 # ==========================================================
-# Dihedral Transformer Autoencoder - VERSION 0.1
+# Dihedral Transformer Autoencoder - VERSION 0.2 (patched)
 # ==========================================================
-# Fixes & upgrades applied:
-# - Robust phi/psi alignment by residue using mdtraj phi_idx/psi_idx
-# - Mask is constant (NOT batched by DataLoader)
-# - Proper unit-circle projection for sin/cos pairs (phi and psi)
-# - Stable loss scaling (MSE over B*N_valid*4)
-# - Warmup + cosine scheduler with safety guards and clamped progress
-# - Validation adds circular angular MAE for phi/psi
-# - Saves latents as .npy and .txt (+ residue id mapping)
-# - NEW: Extract attention pooling weights w per frame and compute per-residue statistics
+#
+# Training is unchanged.
+# At the end you can export for PLUMED:
+#
+#   --plumed_export legacy   -> dihedral_encoder_plumed.pt
+#   --plumed_export coords   -> dihedral_encoder_fromcoords_plumed.pt
+#   --plumed_export both     -> both exports
+#
 # ==========================================================
 
-import math
 import argparse
 import numpy as np
 import torch
 import mdtraj as md
-import torch.nn as nn
 
 from pathlib import Path
 from torch.utils.data import DataLoader, Subset
 
 from pkgs.utils import angles_to_sincos, compute_aligned_phi_psi, DihedralDataset
 from pkgs.model import DihedralTransformerAE, WarmupCosineScheduler
-from pkgs.train import validate_with_metrics, train_epoch, extract_latents, extract_attention_weights
-from pkgs.plumed_export import export_plumed_encoder
+from pkgs.train import (
+    validate_with_metrics,
+    train_epoch,
+    extract_latents,
+    extract_attention_weights,
+)
+
+from pkgs.plumed_export import (
+    export_plumed_encoder,                 # legacy sin/cos export
+    export_plumed_encoder_from_coords,     # coords-only export
+)
+
 
 # -----------------------------
 # Reproducibility
@@ -34,6 +41,7 @@ def set_seed(seed: int = 42):
     torch.manual_seed(seed)
     torch.cuda.manual_seed_all(seed)
     np.random.seed(seed)
+
 
 # -----------------------------
 # Main
@@ -52,36 +60,33 @@ def main(args):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     print(f"Using device: {device}")
 
-    print(f"\nLoading trajectory: {args.trajectory}")
+    print(f"\nLoading training trajectory: {args.trajectory}")
     traj = md.load(args.trajectory, top=args.topology)
     print(f"Loaded frames={traj.n_frames} residues={traj.n_residues}")
 
-    # Compute and align phi/psi robustly
+    # Compute aligned phi/psi
     phi, psi, residue_ids, mask_np = compute_aligned_phi_psi(traj)
     X = angles_to_sincos(phi, psi).astype(np.float32)
 
     n_frames, n_tokens, _ = X.shape
-    print(f"Aligned tokens (residues with BOTH φ and ψ): {n_tokens} / topology residues={traj.n_residues}")
-    print(f"Residue id range (topology indices): {residue_ids.min()}..{residue_ids.max()}")
+    print(f"Aligned tokens: {n_tokens}")
+    print(f"Residue id range: {residue_ids.min()}..{residue_ids.max()}")
 
-    # Dataset
     dataset = DihedralDataset(X, mask_np)
 
-    # Constant mask on device (NOT batched)
+    # Constant mask tensor
     mask_t = dataset.mask.to(device)
 
     # Temporal split
     train_size = int(args.train_split * len(dataset))
     train_size = max(1, min(train_size, len(dataset) - 1))
-    train_idx = list(range(train_size))
-    val_idx = list(range(train_size, len(dataset)))
 
-    train_dataset = Subset(dataset, train_idx)
-    val_dataset = Subset(dataset, val_idx)
+    train_dataset = Subset(dataset, list(range(train_size)))
+    val_dataset = Subset(dataset, list(range(train_size, len(dataset))))
 
-    print(f"\nData split (temporal):")
-    print(f"  Train: {len(train_dataset)} frames (0..{train_size-1})")
-    print(f"  Val:   {len(val_dataset)} frames ({train_size}..{len(dataset)-1})")
+    print(f"\nSplit:")
+    print(f"  Train frames: {len(train_dataset)}")
+    print(f"  Val frames:   {len(val_dataset)}")
 
     pin_memory = (device.type == "cuda")
 
@@ -92,6 +97,7 @@ def main(args):
         num_workers=args.num_workers,
         pin_memory=pin_memory,
     )
+
     val_loader = DataLoader(
         val_dataset,
         batch_size=args.batch_size,
@@ -112,14 +118,12 @@ def main(args):
         latent_dim=args.latent_dim,
     ).to(device)
 
-    n_params = sum(p.numel() for p in model.parameters())
-    print(f"\nModel parameters: {n_params:,}")
+    print(f"\nModel params: {sum(p.numel() for p in model.parameters()):,}")
 
     optimizer = torch.optim.AdamW(
         model.parameters(),
         lr=args.lr,
         weight_decay=args.weight_decay,
-        betas=(0.9, 0.999),
     )
 
     total_steps = args.epochs * max(1, len(train_loader))
@@ -132,184 +136,158 @@ def main(args):
         min_lr_ratio=args.min_lr_ratio,
     )
 
-    print(f"\nTraining config:")
-    print(f"  epochs={args.epochs}  batch_size={args.batch_size}")
-    print(f"  lr={args.lr}  weight_decay={args.weight_decay}")
-    print(f"  warmup_epochs={args.warmup_epochs}  warmup_steps={warmup_steps}  total_steps={total_steps}")
-    print(f"  min_lr_ratio={args.min_lr_ratio}")
-    print(f"  early_stop_patience={args.patience}")
-
+    # Training loop
     best_val = float("inf")
     patience_ctr = 0
-    train_hist = []
-    val_hist = []
-    mae_phi_hist = []
-    mae_psi_hist = []
 
-    print("\nStarting training...")
+    print("\nStarting training...\n")
+
     for epoch in range(args.epochs):
-        tr = train_epoch(model, train_loader, optimizer, scheduler, device, mask_t)
-        val, mae_phi, mae_psi = validate_with_metrics(model, val_loader, device, mask_t)
+        tr_loss = train_epoch(model, train_loader, optimizer, scheduler, device, mask_t)
+        val_loss, mae_phi, mae_psi = validate_with_metrics(model, val_loader, device, mask_t)
 
-        train_hist.append(tr)
-        val_hist.append(val)
-        mae_phi_hist.append(mae_phi)
-        mae_psi_hist.append(mae_psi)
-
-        if epoch % args.log_interval == 0 or epoch < 10:
-            lr_now = scheduler.get_last_lr()[0]
+        if epoch % args.log_interval == 0:
             print(
                 f"Epoch {epoch:04d} | "
-                f"Train {tr:.6f} | Val {val:.6f} | "
-                f"MAEφ {mae_phi:.4f} rad | MAEψ {mae_psi:.4f} rad | "
-                f"LR {lr_now:.2e}"
+                f"Train {tr_loss:.6f} | Val {val_loss:.6f} | "
+                f"MAEφ {mae_phi:.4f} | MAEψ {mae_psi:.4f}"
             )
 
-        if val < best_val:
-            best_val = val
+        # Save best
+        if val_loss < best_val:
+            best_val = val_loss
             patience_ctr = 0
-
-            torch.save(
-                {
-                    "epoch": epoch,
-                    "model_state_dict": model.state_dict(),
-                    "optimizer_state_dict": optimizer.state_dict(),
-                    "val_loss": val,
-                    "config": vars(args),
-                    "token_residue_ids": residue_ids,  # mapping token -> topology residue id
-                    "mask": mask_np,
-                },
-                output_dir / "best_model.pt",
-            )
+            torch.save(model.state_dict(), output_dir / "best_model_weights.pt")
         else:
             patience_ctr += 1
 
         if patience_ctr >= args.patience:
-            print(f"\nEarly stopping at epoch {epoch} (best val={best_val:.6f})")
+            print(f"\nEarly stopping at epoch {epoch}")
             break
 
-    # Save history
-    np.savetxt(output_dir / "train_losses.txt", np.array(train_hist))
-    np.savetxt(output_dir / "val_losses.txt", np.array(val_hist))
-    np.savetxt(output_dir / "mae_phi.txt", np.array(mae_phi_hist))
-    np.savetxt(output_dir / "mae_psi.txt", np.array(mae_psi_hist))
+    # Load best weights
+    model.load_state_dict(torch.load(output_dir / "best_model_weights.pt", map_location=device))
+    model.eval()
 
-    # Load best model
-    ckpt = torch.load(output_dir / "best_model.pt", map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
-    print(f"\nLoaded best model: val_loss={ckpt['val_loss']:.6f} at epoch={ckpt['epoch']}")
+    print("\nLoaded best model weights.")
 
-    # Extract latents for full dataset
-    full_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, pin_memory=pin_memory)
+    # Extract latents
+    full_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
     latents = extract_latents(model, full_loader, device, mask_t)
 
     np.save(output_dir / "latents.npy", latents)
-    np.savetxt(output_dir / "latents.txt", latents)
-    np.savetxt(output_dir / "token_residue_ids.txt", residue_ids, fmt="%d")
-
-    print(f"\nSaved:")
-    print(f"  latents.npy / latents.txt  (shape={latents.shape})")
-    print(f"  token_residue_ids.txt      (len={len(residue_ids)})")
-    print(f"  training histories         (train/val/mae_phi/mae_psi)")
+    print(f"Saved latents.npy shape={latents.shape}")
 
     # =============================
-    # NEW: ATTENTION WEIGHTS EXPORT
+    # PLUMED EXPORT OPTIONS
     # =============================
     print(f"\n{'=' * 60}")
-    print("Extracting attention pooling weights w per frame...")
+    print("PLUMED EXPORT")
+    print(f"Mode selected: {args.plumed_export}")
     print(f"{'=' * 60}")
 
-    W = extract_attention_weights(model, full_loader, device, mask_t)  # (n_frames, n_tokens)
+    # --- LEGACY EXPORT ---
+    if args.plumed_export in ("legacy", "both"):
+        print("\n[1] Exporting LEGACY encoder (sin/cos input via ARG=...)")
 
-    w_mean = W.mean(axis=0)              # (n_tokens,)
-    w_median = np.median(W, axis=0)      # (n_tokens,)
+        export_plumed_encoder(
+            model=model,
+            output_dir=output_dir,
+            n_tokens=n_tokens,
+            latent_dim=args.latent_dim,
+            residue_ids=residue_ids,
+            mask_np=np.asarray(mask_np, dtype=bool),
+            pt_name="dihedral_encoder_plumed.pt",
+            info_name="plumed_info.json",
+        )
 
-    np.save(output_dir / "attn_weights.npy", W)
-    np.savetxt(output_dir / "attn_weights_mean.txt", w_mean)
-    np.savetxt(output_dir / "attn_weights_median.txt", w_median)
+        print("✓ Saved dihedral_encoder_plumed.pt")
+        print("✓ Saved plumed_info.json")
 
-    attn_table = np.column_stack([residue_ids.astype(int), w_mean, w_median])
-    np.savetxt(
-        output_dir / "attn_importance_by_residue.txt",
-        attn_table,
-        header="residue_id w_mean w_median",
-        fmt=["%d", "%.8e", "%.8e"],
-    )
+    # --- COORDS EXPORT ---
+    if args.plumed_export in ("coords", "both"):
+        if args.plumed_top is None:
+            raise RuntimeError(
+                "coords export requires --plumed_top (e.g. npt.gro)"
+            )
 
-    print(f"Saved attention outputs:")
-    print(f"  attn_weights.npy                 (shape={W.shape})")
-    print(f"  attn_weights_mean.txt            (shape={w_mean.shape})")
-    print(f"  attn_weights_median.txt          (shape={w_median.shape})")
-    print(f"  attn_importance_by_residue.txt   (residue_id, mean, median)")
+        print("\n[2] Exporting COORDS-only encoder (ATOMS=... input)")
 
-    topk = min(20, len(residue_ids))
-    idx = np.argsort(-w_mean)[:topk]
-    print("\nTop residues by MEAN attention weight:")
-    for r, m, med in zip(residue_ids[idx], w_mean[idx], w_median[idx]):
-        print(f"  residue {int(r):4d} | mean={m:.6e} | median={med:.6e}")
+        export_plumed_encoder_from_coords(
+            model=model,
+            output_dir=output_dir,
+            n_tokens=n_tokens,
+            latent_dim=args.latent_dim,
+            residue_ids=residue_ids,
+            mask_np=np.asarray(mask_np, dtype=bool),
+            training_top=args.topology,
+            training_traj=args.trajectory,
+            plumed_top=args.plumed_top,
+            plumed_traj=None,
+            pt_name="dihedral_encoder_fromcoords_plumed.pt",
+            info_name="plumed_info_fromcoords.json",
+        )
 
-    # =============================
-    # PLUMED EXPORT
-    # =============================
-    print(f"\n{'=' * 60}")
-    print("Exporting model for PLUMED integration...")
-    print(f"{'=' * 60}")
+        print("✓ Saved dihedral_encoder_fromcoords_plumed.pt")
+        print("✓ Saved plumed_info_fromcoords.json")
 
-    pt_path, info_path = export_plumed_encoder(
-        model=model,
-        output_dir=output_dir,
-        n_tokens=n_tokens,
-        latent_dim=args.latent_dim,
-        residue_ids=residue_ids,
-        mask_np=np.asarray(mask_np, dtype=bool),
-        pt_name="dihedral_encoder_plumed.pt",
-        info_name="plumed_info.json",
-    )
-
-    print(f"✓ Saved PLUMED-compatible encoder: {pt_path}")
-    print(f"  Input shape: (batch, {4 * n_tokens}) = flat sin/cos for {n_tokens} residues")
-    print(f"  Output shape: (batch, {args.latent_dim})")
-    print(f"✓ Saved PLUMED metadata: {info_path}")
-
-    print(f"\n{'=' * 60}")
-    print(f"Done. Output dir: {output_dir}")
+    print(f"\nAll exports saved in: {output_dir}")
     print(f"{'=' * 60}")
 
 
+# -----------------------------
+# CLI
+# -----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train Dihedral Transformer Autoencoder (aligned phi/psi, fixed masking, angular metrics)",
+        description="Train DihedralTransformerAE + export PLUMED TorchScript encoders",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
-    # Data
-    parser.add_argument("--trajectory", type=str, required=True, help="Trajectory file (.xtc, .dcd, ...)")
-    parser.add_argument("--topology", type=str, required=True, help="Topology file (.pdb, .gro, ...)")
-    parser.add_argument("--output_dir", type=str, default="output", help="Output directory")
+    # Training data
+    parser.add_argument("--trajectory", type=str, required=True)
+    parser.add_argument("--topology", type=str, required=True)
 
-    # Model
-    parser.add_argument("--d_model", type=int, default=64, help="Model dimension")
-    parser.add_argument("--nhead", type=int, default=8, help="Number of attention heads")
-    parser.add_argument("--num_encoder_layers", type=int, default=3, help="Encoder layers")
-    parser.add_argument("--num_decoder_layers", type=int, default=3, help="Decoder layers")
-    parser.add_argument("--dim_feedforward", type=int, default=256, help="FFN dimension")
-    parser.add_argument("--dropout", type=float, default=0.1, help="Dropout")
-    parser.add_argument("--latent_dim", type=int, default=2, help="Latent dimension")
+    # Output
+    parser.add_argument("--output_dir", type=str, default="output")
 
-    # Training
-    parser.add_argument("--batch_size", type=int, default=64, help="Batch size")
-    parser.add_argument("--epochs", type=int, default=1000, help="Max epochs")
-    parser.add_argument("--lr", type=float, default=3e-4, help="Peak learning rate")
-    parser.add_argument("--weight_decay", type=float, default=1e-5, help="Weight decay")
-    parser.add_argument("--train_split", type=float, default=0.9, help="Temporal split fraction for train")
-    parser.add_argument("--warmup_epochs", type=int, default=10, help="Warmup epochs")
-    parser.add_argument("--min_lr_ratio", type=float, default=0.01, help="Min LR ratio for cosine decay")
+    # PLUMED export mode
+    parser.add_argument(
+        "--plumed_export",
+        choices=["legacy", "coords", "both"],
+        default="both",
+        help="Which PLUMED encoder export to generate",
+    )
 
-    # Early stopping / misc
-    parser.add_argument("--patience", type=int, default=100, help="Early stopping patience (epochs)")
-    parser.add_argument("--seed", type=int, default=42, help="Random seed")
-    parser.add_argument("--num_workers", type=int, default=0, help="DataLoader workers")
-    parser.add_argument("--log_interval", type=int, default=10, help="Log every N epochs")
+    parser.add_argument(
+        "--plumed_top",
+        type=str,
+        default=None,
+        help="Topology used in production MD/PLUMED (e.g. npt.gro). Required for coords export.",
+    )
+
+    # Model hyperparams
+    parser.add_argument("--d_model", type=int, default=64)
+    parser.add_argument("--nhead", type=int, default=8)
+    parser.add_argument("--num_encoder_layers", type=int, default=3)
+    parser.add_argument("--num_decoder_layers", type=int, default=3)
+    parser.add_argument("--dim_feedforward", type=int, default=256)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    parser.add_argument("--latent_dim", type=int, default=2)
+
+    # Training params
+    parser.add_argument("--batch_size", type=int, default=64)
+    parser.add_argument("--epochs", type=int, default=1000)
+    parser.add_argument("--lr", type=float, default=3e-4)
+    parser.add_argument("--weight_decay", type=float, default=1e-5)
+    parser.add_argument("--train_split", type=float, default=0.9)
+    parser.add_argument("--warmup_epochs", type=int, default=10)
+    parser.add_argument("--min_lr_ratio", type=float, default=0.01)
+
+    parser.add_argument("--patience", type=int, default=100)
+    parser.add_argument("--seed", type=int, default=42)
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--log_interval", type=int, default=10)
 
     args = parser.parse_args()
     main(args)
