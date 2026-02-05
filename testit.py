@@ -179,6 +179,41 @@ def main(args):
     print(f"Saved latents.npy shape={latents.shape}")
 
     # =============================
+    # ATTENTION WEIGHTS EXPORT
+    # =============================
+    print(f"\n{'=' * 60}")
+    print("Extracting attention pooling weights w per frame...")
+    print(f"{'=' * 60}")
+
+    W = extract_attention_weights(model, full_loader, device, mask_t)  # (n_frames, n_tokens)
+    w_mean = W.mean(axis=0)              # (n_tokens,)
+    w_median = np.median(W, axis=0)      # (n_tokens,)
+
+    np.save(output_dir / "attn_weights.npy", W)
+    np.savetxt(output_dir / "attn_weights_mean.txt", w_mean)
+    np.savetxt(output_dir / "attn_weights_median.txt", w_median)
+
+    attn_table = np.column_stack([residue_ids.astype(int), w_mean, w_median])
+    np.savetxt(
+        output_dir / "attn_importance_by_residue.txt",
+        attn_table,
+        header="residue_id w_mean w_median",
+        fmt=["%d", "%.8e", "%.8e"],
+    )
+
+    print(f"Saved attention outputs:")
+    print(f"  attn_weights.npy                 (shape={W.shape})")
+    print(f"  attn_weights_mean.txt            (shape={w_mean.shape})")
+    print(f"  attn_weights_median.txt          (shape={w_median.shape})")
+    print(f"  attn_importance_by_residue.txt   (residue_id, mean, median)")
+
+    topk = min(20, len(residue_ids))
+    idx = np.argsort(-w_mean)[:topk]
+    print("\nTop residues by MEAN attention weight:")
+    for r, m, med in zip(residue_ids[idx], w_mean[idx], w_median[idx]):
+        print(f"  residue {int(r):4d} | mean={m:.6e} | median={med:.6e}")
+
+    # =============================
     # PLUMED EXPORT OPTIONS
     # =============================
     print(f"\n{'=' * 60}")
