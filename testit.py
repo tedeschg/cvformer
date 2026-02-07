@@ -115,6 +115,7 @@ def main(args):
             hidden=args.critic_hidden,
             depth=args.critic_depth,
             dropout=args.critic_dropout,
+            use_layer_norm=args.critic_layer_norm,
         ).to(device)
 
         opt_critic = torch.optim.AdamW(
@@ -146,6 +147,14 @@ def main(args):
 
     print("\nStarting training...")
     for epoch in range(args.epochs):
+        # Lambda_adv warmup
+        curr_lambda_adv = args.lambda_adv
+        if args.use_aae and args.lambda_adv_warmup_epochs > 0:
+            if epoch < args.lambda_adv_warmup_epochs:
+                curr_lambda_adv = args.lambda_adv * (epoch / args.lambda_adv_warmup_epochs)
+            else:
+                curr_lambda_adv = args.lambda_adv
+
         if not args.use_aae:
             tr = train_epoch(model, train_loader, optimizer, scheduler, device, mask_t)
         else:
@@ -160,10 +169,11 @@ def main(args):
                 device=device,
                 mask=mask_t,
                 prior_kind=args.prior_kind,
-                lambda_adv=args.lambda_adv,
+                lambda_adv=curr_lambda_adv,
                 n_critic=args.n_critic,
                 lambda_gp=args.lambda_gp,
                 freeze_decoder_on_adv=not args.adv_updates_decoder,
+                balance_loss=args.balance_loss,
             )
             tr = tr_recon
             crit_hist.append(tr_crit)
@@ -185,7 +195,7 @@ def main(args):
         else:
             print(
                 f"Epoch {epoch:04d} | Recon {tr_recon:.6f} | Crit {tr_crit:.4f} | Gen {tr_gen:.4f} | "
-                f"Val {val:.6f} | MAEφ {mae_phi:.4f} | MAEψ {mae_psi:.4f} | LR {lr_now:.2e}"
+                f"Val {val:.6f} | MAEφ {mae_phi:.4f} | MAEψ {mae_psi:.4f} | LAdv {curr_lambda_adv:.3f} | LR {lr_now:.2e}"
             )
 
         # Early stopping monitors ONLY validation reconstruction loss
@@ -232,6 +242,14 @@ def main(args):
 
     np.save(output_dir / "latents.npy", latents)
     np.savetxt(output_dir / "latents.txt", latents)
+
+    # Print latent stats
+    z_mean = latents.mean(axis=0)
+    z_std = latents.std(axis=0)
+    print(f"\nLatent statistics (should be close to 0 and 1 for Gaussian):")
+    print(f"  Mean: {z_mean}")
+    print(f"  Std:  {z_std}")
+
     np.savetxt(output_dir / "token_residue_ids.txt", residue_ids, fmt="%d")
 
     print(f"\nSaved latents: shape={latents.shape}")
@@ -294,9 +312,11 @@ def build_parser():
     p.add_argument("--use_aae", action="store_true")
     p.add_argument("--prior_kind", type=str, default="gaussian", choices=["gaussian", "uniform"])
     p.add_argument("--lambda_adv", type=float, default=0.2)
+    p.add_argument("--lambda_adv_warmup_epochs", type=int, default=0, help="Linear warmup for lambda_adv from 0 to target")
     p.add_argument("--n_critic", type=int, default=5)
     p.add_argument("--lambda_gp", type=float, default=10.0)
     p.add_argument("--adv_updates_decoder", action="store_true")
+    p.add_argument("--balance_loss", action="store_true", help="Dynamically balance reconstruction and adversarial loss")
 
     # critic
     p.add_argument("--critic_lr", type=float, default=5e-4)
@@ -304,6 +324,8 @@ def build_parser():
     p.add_argument("--critic_hidden", type=int, default=128)
     p.add_argument("--critic_depth", type=int, default=3)
     p.add_argument("--critic_dropout", type=float, default=0.1)
+    p.add_argument("--critic_layer_norm", action="store_true", default=True)
+    p.add_argument("--no_critic_layer_norm", action="store_false", dest="critic_layer_norm")
 
     return p
 

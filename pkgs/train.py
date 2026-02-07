@@ -144,6 +144,7 @@ def train_epoch_aae_wgangp(
     n_critic: int = 5,
     lambda_gp: float = 10.0,
     freeze_decoder_on_adv: bool = True,
+    balance_loss: bool = False,
 ):
     """
     One epoch of AAE training with WGAN-GP in latent space.
@@ -160,6 +161,10 @@ def train_epoch_aae_wgangp(
     total_crit = 0.0
     total_gen = 0.0
     n_batches = 0
+
+    # For dynamic balancing
+    last_loss_recon = None
+    last_loss_gen = None
 
     for batch in loader:
         batch = batch.to(device)
@@ -211,11 +216,28 @@ def train_epoch_aae_wgangp(
         z_fake2 = ae.encode(batch, mask)
         loss_gen = -critic(z_fake2).mean()
 
+        eff_lambda_adv = lambda_adv
+        if balance_loss and last_loss_recon is not None and last_loss_gen is not None:
+            # Simple heuristic: try to keep the magnitude of gradients somewhat comparable
+            # or just scale by ratio of losses. 
+            # Here we use a very simple approach: if recon loss is much larger, reduce lambda_adv
+            # We use absolute value for loss_gen because it's -D(z) and can be anything
+            recon_val = float(loss_recon.item())
+            gen_val = abs(float(loss_gen.item()))
+            if gen_val > 1e-6:
+                eff_lambda_adv = lambda_adv * (recon_val / gen_val)
+                # Clamp to avoid extreme values. 
+                # Lower bound ensures the adversarial signal doesn't vanish.
+                eff_lambda_adv = max(min(eff_lambda_adv, lambda_adv * 10), lambda_adv / 5)
+
         opt_ae.zero_grad()
-        (lambda_adv * loss_gen).backward()
+        (eff_lambda_adv * loss_gen).backward()
         torch.nn.utils.clip_grad_norm_(ae.parameters(), 1.0)
         opt_ae.step()
         sch_ae.step()
+
+        last_loss_recon = float(loss_recon.item())
+        last_loss_gen = float(loss_gen.item())
 
         if freeze_decoder_on_adv:
             _set_requires_grad(ae.decoder, True)

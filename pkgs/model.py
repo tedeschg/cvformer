@@ -31,7 +31,7 @@ class LatentCritic(nn.Module):
     Simple MLP critic over z.
     Outputs scores (no sigmoid).
     """
-    def __init__(self, latent_dim: int, hidden: int = 128, depth: int = 3, dropout: float = 0.1):
+    def __init__(self, latent_dim: int, hidden: int = 128, depth: int = 3, dropout: float = 0.1, use_layer_norm: bool = True):
         super().__init__()
         if depth < 2:
             raise ValueError("depth must be >= 2")
@@ -39,8 +39,10 @@ class LatentCritic(nn.Module):
         layers: list[nn.Module] = []
         d_in = latent_dim
         for _ in range(depth - 1):
+            layers += [nn.Linear(d_in, hidden)]
+            if use_layer_norm:
+                layers.append(nn.LayerNorm(hidden))
             layers += [
-                nn.Linear(d_in, hidden),
                 nn.GELU(),
                 nn.Dropout(dropout),
             ]
