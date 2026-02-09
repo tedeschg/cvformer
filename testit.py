@@ -192,6 +192,7 @@ def main(args):
     np.save(output_dir / "attn_weights.npy", W)
     np.savetxt(output_dir / "attn_weights_mean.txt", w_mean)
     np.savetxt(output_dir / "attn_weights_median.txt", w_median)
+    np.savetxt(output_dir / "token_residue_ids.txt", residue_ids, fmt="%d")
 
     attn_table = np.column_stack([residue_ids.astype(int), w_mean, w_median])
     np.savetxt(
