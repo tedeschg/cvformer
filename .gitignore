@@ -1,14 +1,14 @@
 # Folders
-cvformer-test/
 __pycache__/
 .venv/
 .idea/
+cvformer-test/
 
 # Files
-*.pycgit
+*.pyc
 .env
 
-# Include specific files
-!cvformer-test/analyze
+# Include specific files inside cvformer-test
+!cvformer-test/analyze/
 !cvformer-test/analyze/mutual_information_latent.ipynb
 !cvformer-test/analyze/residue_importance.ipynb
