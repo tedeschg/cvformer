@@ -1,0 +1,47 @@
+                :-) GROMACS - gmx grompp, 2024-plumed_2.10.0 (-:
+
+Executable:   /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi
+Data prefix:  /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs
+Working dir:  /scratch.ssd/tedeschg/job_17306180.pbs-m1
+Command line:
+  gmx_mpi grompp -f /storage/brno2/home/tedeschg/prj/cvformer/prepare/md_files/md.mdp -c /storage/brno2/home/tedeschg/prj/cvformer/05.mtd_test-05_plain_cvformer/mtd01.gro -t /storage/brno2/home/tedeschg/prj/cvformer/05.mtd_test-05_plain_cvformer/mtd01.cpt -p /storage/brno2/home/tedeschg/prj/cvformer/prepare/topol.top -o mtd02
+
+Ignoring obsolete mdp entry 'ns_type'
+Generating 1-4 interactions: fudge = 0.5
+Number of degrees of freedom in T-Coupling group Protein is 687.87
+Number of degrees of freedom in T-Coupling group non-Protein is 15234.13
+Last frame         -1 time 20000.000   
+
+GROMACS reminds you: "I Smell Smoke From a Gun Named Extinction" (Pixies)
+
+                :-) GROMACS - gmx mdrun, 2024-plumed_2.10.0 (-:
+
+Executable:   /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi
+Data prefix:  /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs
+Working dir:  /scratch.ssd/tedeschg/job_17306180.pbs-m1
+Command line:
+  gmx_mpi mdrun -deffnm mtd02 -plumed plumed.dat
+
+Reading file mtd02.tpr, VERSION 2024-plumed_2.10.0 (single precision)
+Changing nstlist from 10 to 50, rlist from 1 to 1.109
+
+Using 1 MPI process
+
+Non-default thread affinity set, disabling internal thread affinity
+
+Using 12 OpenMP threads 
+
+starting mdrun 'S  C  A  M  O  R  G in water'
+10000000 steps,  20000.0 ps.
+
+Writing final coordinates.
+
+               Core t (s)   Wall t (s)        (%)
+       Time:   112954.666     9412.889     1200.0
+                         2h36:52
+                 (ns/day)    (hour/ns)
+Performance:      183.578        0.131
+
+GROMACS reminds you: "With four parameters I can fit an elephant, and with five I can make him wiggle his trunk." (John von Neumann)
+
+rm: cannot remove '/scratch.ssd/tedeschg/job_17306180.pbs-m1': Permission denied

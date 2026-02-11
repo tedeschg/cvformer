@@ -1,0 +1,44 @@
+                :-) GROMACS - gmx grompp, 2024-plumed_2.10.0 (-:
+
+Executable:   /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi
+Data prefix:  /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs
+Working dir:  /scratch.ssd/tedeschg/job_17300206.pbs-m1
+Command line:
+  gmx_mpi grompp -f /storage/brno2/home/tedeschg/prj/cvformer/prepare/md_files/md.mdp -c /storage/brno2/home/tedeschg/prj/cvformer/prepare/npt.gro -t /storage/brno2/home/tedeschg/prj/cvformer/prepare/npt.cpt -p /storage/brno2/home/tedeschg/prj/cvformer/prepare/topol.top -o mtd01
+
+Ignoring obsolete mdp entry 'ns_type'
+Generating 1-4 interactions: fudge = 0.5
+Number of degrees of freedom in T-Coupling group Protein is 687.87
+Number of degrees of freedom in T-Coupling group non-Protein is 15234.13
+Last frame         -1 time  100.000   
+
+GROMACS reminds you: "It is a cute toxin." (Rebecca Howard)
+
+                :-) GROMACS - gmx mdrun, 2024-plumed_2.10.0 (-:
+
+Executable:   /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs/bin/gmx_mpi
+Data prefix:  /storage/brno2/home/tedeschg/miscellaneous/gromacs_plumed2025/run/gromacs
+Working dir:  /scratch.ssd/tedeschg/job_17300206.pbs-m1
+Command line:
+  gmx_mpi mdrun -deffnm mtd01 -plumed plumed.dat
+
+Reading file mtd01.tpr, VERSION 2024-plumed_2.10.0 (single precision)
+Changing nstlist from 10 to 50, rlist from 1 to 1.11
+
+Using 1 MPI process
+Using 12 OpenMP threads 
+
+starting mdrun 'S  C  A  M  O  R  G in water'
+10000000 steps,  20000.0 ps.
+
+Writing final coordinates.
+
+               Core t (s)   Wall t (s)        (%)
+       Time:    88646.664     7387.222     1200.0
+                         2h03:07
+                 (ns/day)    (hour/ns)
+Performance:      233.917        0.103
+
+GROMACS reminds you: "If There Is No Guitar In The House, You Know It's Owner Can Not Be Trusted" (Gogol Bordello)
+
+rm: cannot remove '/scratch.ssd/tedeschg/job_17300206.pbs-m1': Permission denied
