@@ -10,3 +10,5 @@ __pycache__/
 
 # Include specific files
 !cvformer-test/analyze
+!cvformer-test/analyze/mutual_information_latent.ipynb
+!cvformer-test/analyze/residue_importance.ipynb
