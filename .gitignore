@@ -9,7 +9,3 @@ cvformer-test/
 .env
 
 # Include specific files inside cvformer-test
-!cvformer-test/
-!cvformer-test/analyze/
-!cvformer-test/analyze/mutual_information_latent.ipynb
-!cvformer-test/analyze/residue_importance.ipynb
