@@ -5,32 +5,21 @@ import torch
 import torch.nn as nn
 
 
-# ==========================================================
-# Dihedral Transformer Autoencoder (TorchScript + PLUMED safe)
-# - Proper TransformerDecoder (cross-attn to latent-derived memory)
-# - Mask handling fixed + TorchScript-safe
-# - No torch.finfo / no torch.device args in scripted paths
-# - Includes WarmupCosineScheduler (for your training script)
-# ==========================================================
-
-
 # -----------------------------
 # Positional Encoding
 # -----------------------------
 class SinusoidalPositionalEncoding(nn.Module):
     """
-    Standard sinusoidal positional encoding (buffer, no learned parameters).
+    Standard sinusoidal positional encoding (buffer, no learned params).
     """
     def __init__(self, d_model: int, max_len: int = 2048):
         super().__init__()
         pe = torch.zeros(max_len, d_model)
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
-        div_term = torch.exp(
-            torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model)
-        )
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-math.log(10000.0) / d_model))
         pe[:, 0::2] = torch.sin(position * div_term)
         pe[:, 1::2] = torch.cos(position * div_term)
-        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)
+        self.register_buffer("pe", pe.unsqueeze(0), persistent=False)  # (1, max_len, d_model)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return x + self.pe[:, : x.size(1), :]
@@ -41,18 +30,17 @@ class SinusoidalPositionalEncoding(nn.Module):
 # -----------------------------
 class DihedralTransformerAE(nn.Module):
     """
-    Autoencoder for dihedral angles represented as:
-      (sin_phi, cos_phi, sin_psi, cos_psi)
+    AE for dihedral angles represented as (sin_phi, cos_phi, sin_psi, cos_psi).
 
-    Encoder: TransformerEncoder + attention pooling -> latent z
-    Decoder: TransformerDecoder cross-attending to latent-derived memory
+    Encoder:
+      - input proj + PE + TransformerEncoder
+      - attention pooling -> latent z
 
-    TorchScript/PLUMED constraints:
-      - avoid torch.finfo
-      - avoid passing torch.device in scripted code paths
-      - mask handling must be deterministic and typed
+    Decoder (proper TransformerDecoder):
+      - learned residue queries (tgt) + PE
+      - memory from latent (latent -> memory_tokens sequence)
+      - cross-attention -> output proj -> normalize sin/cos pairs
     """
-
     def __init__(
         self,
         n_tokens: int,
@@ -66,12 +54,12 @@ class DihedralTransformerAE(nn.Module):
         memory_tokens: int = 4,
     ):
         super().__init__()
-        self.n_tokens = int(n_tokens)
-        self.d_model = int(d_model)
-        self.latent_dim = int(latent_dim)
-        self.memory_tokens = int(memory_tokens)
+        self.n_tokens = n_tokens
+        self.d_model = d_model
+        self.latent_dim = latent_dim
+        self.memory_tokens = memory_tokens
 
-        # ---- Encoder ----
+        # Encoder
         self.input_proj = nn.Linear(4, d_model)
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len=n_tokens)
         self.input_norm = nn.LayerNorm(d_model)
@@ -101,8 +89,8 @@ class DihedralTransformerAE(nn.Module):
             nn.Linear(dim_feedforward, latent_dim),
         )
 
-        # ---- Decoder (proper TransformerDecoder) ----
-        self.residue_queries = nn.Parameter(torch.empty(1, n_tokens, d_model))
+        # Decoder
+        self.residue_queries = nn.Parameter(torch.randn(1, n_tokens, d_model) * 0.02)
 
         self.from_latent = nn.Sequential(
             nn.Linear(latent_dim, dim_feedforward),
@@ -132,43 +120,11 @@ class DihedralTransformerAE(nn.Module):
         self._init_parameters()
 
     def _init_parameters(self):
-        # Xavier for most weights; keep residue_queries small
+        # Xavier on most params, keep residue_queries small
         for name, p in self.named_parameters():
             if p.dim() > 1 and name != "residue_queries":
                 nn.init.xavier_uniform_(p)
         nn.init.normal_(self.residue_queries, mean=0.0, std=0.02)
-
-    # -----------------------------
-    # TorchScript-safe mask handling
-    # -----------------------------
-    @staticmethod
-    def _canonicalize_mask(
-        mask: Optional[torch.Tensor],
-        B: int,
-        N: int,
-        ref: torch.Tensor,
-    ) -> Optional[torch.Tensor]:
-        """
-        Returns mask (B,N) bool where True=valid and False=padding.
-        Accepts None, (N,), or (B,N).
-        TorchScript-safe: uses ref tensor to move device.
-        """
-        if mask is None:
-            return None
-
-        mask = mask.to(ref).to(dtype=torch.bool)
-
-        if mask.dim() == 1:
-            if mask.numel() != N:
-                raise RuntimeError("mask (N,) wrong length")
-            return mask.unsqueeze(0).expand(B, -1)
-
-        if mask.dim() == 2:
-            if mask.size(0) != B or mask.size(1) != N:
-                raise RuntimeError("mask (B,N) wrong shape")
-            return mask
-
-        raise RuntimeError("mask must be None, (N,), or (B,N)")
 
     @staticmethod
     def _normalize_sincos_pairs(x: torch.Tensor, eps: float = 1e-8) -> torch.Tensor:
@@ -178,50 +134,58 @@ class DihedralTransformerAE(nn.Module):
         psi = psi / (psi.norm(p=2, dim=-1, keepdim=True) + eps)
         return torch.cat([phi, psi], dim=-1)
 
-    # -----------------------------
-    # Encode
-    # -----------------------------
-    def _encode_core(
-        self, x: torch.Tensor, mask: Optional[torch.Tensor] = None
-    ) -> Tuple[torch.Tensor, torch.Tensor]:
+    @staticmethod
+    def _canonicalize_mask(mask: Optional[torch.Tensor], B: int, N: int, device: torch.device) -> Optional[torch.Tensor]:
+        """
+        Returns bool mask (B, N) where True=valid, False=padding.
+        Accepts None, (N,), (B, N).
+        """
+        if mask is None:
+            return None
+        mask = mask.to(device=device, dtype=torch.bool)
+        if mask.dim() == 1:
+            assert mask.numel() == N
+            mask = mask.unsqueeze(0).expand(B, -1)
+        elif mask.dim() == 2:
+            assert mask.shape == (B, N)
+        else:
+            raise ValueError("mask must be None, (N,), or (B,N)")
+        return mask
+
+    def _encode_core(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         B, N, _ = x.shape
-        mask_bn = self._canonicalize_mask(mask, B, N, x)
+        mask_bn = self._canonicalize_mask(mask, B, N, x.device)
 
         h = self.input_proj(x)
         h = self.pos_enc(h)
         h = self.input_norm(h)
 
         if mask_bn is not None:
-            h = self.encoder(h, src_key_padding_mask=~mask_bn)  # True=ignore
+            h = self.encoder(h, src_key_padding_mask=~mask_bn)
         else:
             h = self.encoder(h)
 
         scores = self.attn_pool(h).squeeze(-1)  # (B, N)
 
         if mask_bn is not None:
-            # TorchScript-safe constant (works in fp16/bf16/fp32)
-            scores = scores.masked_fill(~mask_bn, -1.0e4)
+            scores = scores.masked_fill(~mask_bn, torch.finfo(scores.dtype).min)
 
-        w = torch.softmax(scores, dim=1)         # (B, N)
-        pooled = (h * w.unsqueeze(-1)).sum(1)    # (B, d_model)
-        z = self.to_latent(pooled)               # (B, latent_dim)
+        w = torch.softmax(scores, dim=1)       # (B, N)
+        pooled = (h * w.unsqueeze(-1)).sum(1)  # (B, d_model)
+        z = self.to_latent(pooled)             # (B, latent_dim)
         return z, w
 
     def encode(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         z, _ = self._encode_core(x, mask)
         return z
 
-    @torch.jit.ignore
     def encode_with_attention(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
         return self._encode_core(x, mask)
 
-    # -----------------------------
-    # Decode
-    # -----------------------------
     def decode(self, z: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B = z.size(0)
         N = self.n_tokens
-        mask_bn = self._canonicalize_mask(mask, B, N, z)
+        mask_bn = self._canonicalize_mask(mask, B, N, z.device)
 
         mem = self.from_latent(z).view(B, self.memory_tokens, self.d_model)
 
@@ -238,8 +202,7 @@ class DihedralTransformerAE(nn.Module):
         )
 
         x_hat = self.output_proj(h)
-        x_hat = self._normalize_sincos_pairs(x_hat)
-        return x_hat
+        return self._normalize_sincos_pairs(x_hat)
 
     def forward(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None):
         z = self.encode(x, mask)
@@ -250,11 +213,7 @@ class DihedralTransformerAE(nn.Module):
 # -----------------------------
 # Loss
 # -----------------------------
-def dihedral_loss(
-    x_hat: torch.Tensor,
-    x: torch.Tensor,
-    mask: Optional[torch.Tensor] = None,
-) -> torch.Tensor:
+def dihedral_loss(x_hat: torch.Tensor, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
     """
     MSE on sin/cos, averaged over valid tokens and channels.
     mask: None, (N,), or (B,N) with True=valid.
@@ -262,28 +221,26 @@ def dihedral_loss(
     if mask is None:
         return ((x_hat - x) ** 2).mean()
 
-    mask = mask.to(x).to(dtype=torch.bool)
+    mask = mask.to(device=x.device, dtype=torch.bool)
     B, N, C = x.shape
 
     if mask.dim() == 1:
-        if mask.numel() != N:
-            raise RuntimeError("mask (N,) wrong length")
-        m = mask.unsqueeze(0).unsqueeze(-1).float()  # (1, N, 1)
+        assert mask.numel() == N
+        m = mask.unsqueeze(0).unsqueeze(-1).float()  # (1,N,1)
         diff2 = ((x_hat - x) ** 2) * m
         n_valid = mask.sum().clamp(min=1).float()
-        denom = float(B) * n_valid * float(C)
+        denom = B * n_valid * C
         return diff2.sum() / denom
 
     if mask.dim() == 2:
-        if mask.size(0) != B or mask.size(1) != N:
-            raise RuntimeError("mask (B,N) wrong shape")
-        m = mask.unsqueeze(-1).float()  # (B, N, 1)
+        assert mask.shape == (B, N)
+        m = mask.unsqueeze(-1).float()
         diff2 = ((x_hat - x) ** 2) * m
         n_valid_total = mask.sum().clamp(min=1).float()
-        denom = n_valid_total * float(C)
+        denom = n_valid_total * C
         return diff2.sum() / denom
 
-    raise RuntimeError("mask must be None, (N,), or (B,N)")
+    raise ValueError("mask must be None, (N,), or (B,N)")
 
 
 # -----------------------------

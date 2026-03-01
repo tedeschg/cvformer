@@ -1,37 +1,28 @@
 # ==========================================================
-# Dihedral Transformer Autoencoder - VERSION 0.2 (patched)
+# Dihedral Transformer Autoencoder - VERSION 0.3 (no PLUMED)
 # ==========================================================
 #
-# Training is unchanged.
-# At the end you can export for PLUMED:
-#
-#   --plumed_export legacy   -> dihedral_encoder_plumed.pt
-#   --plumed_export coords   -> dihedral_encoder_fromcoords_plumed.pt
-#   --plumed_export both     -> both exports
+# - Training + latents export + attention weights export
+# - NO PLUMED / TorchScript export (removed)
 #
 # ==========================================================
 
 import argparse
+from pathlib import Path
+
+import mdtraj as md
 import numpy as np
 import torch
-import mdtraj as md
-
-from pathlib import Path
 from torch.utils.data import DataLoader, Subset
 
-from pkgs.utils import angles_to_sincos, compute_aligned_phi_psi, DihedralDataset
 from pkgs.model import DihedralTransformerAE, WarmupCosineScheduler
 from pkgs.train import (
-    validate_with_metrics,
-    train_epoch,
-    extract_latents,
     extract_attention_weights,
+    extract_latents,
+    train_epoch,
+    validate_with_metrics,
 )
-
-from pkgs.plumed_export import (
-    export_plumed_encoder,                 # legacy sin/cos export
-    export_plumed_encoder_from_coords,     # coords-only export
-)
+from pkgs.utils import DihedralDataset, angles_to_sincos, compute_aligned_phi_psi
 
 
 # -----------------------------
@@ -74,13 +65,12 @@ def main(args):
 
     dataset = DihedralDataset(X, mask_np)
 
-    # Constant mask tensor
+    # Constant mask tensor (global over tokens)
     mask_t = dataset.mask.to(device)
 
     # Temporal split
     train_size = int(args.train_split * len(dataset))
     train_size = max(1, min(train_size, len(dataset) - 1))
-
     train_dataset = Subset(dataset, list(range(train_size)))
     val_dataset = Subset(dataset, list(range(train_size, len(dataset))))
 
@@ -116,6 +106,7 @@ def main(args):
         dim_feedforward=args.dim_feedforward,
         dropout=args.dropout,
         latent_dim=args.latent_dim,
+        memory_tokens=args.memory_tokens,
     ).to(device)
 
     print(f"\nModel params: {sum(p.numel() for p in model.parameters()):,}")
@@ -172,9 +163,8 @@ def main(args):
     print("\nLoaded best model weights.")
 
     # Extract latents
-    full_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False)
+    full_loader = DataLoader(dataset, batch_size=args.batch_size, shuffle=False, num_workers=args.num_workers)
     latents = extract_latents(model, full_loader, device, mask_t)
-
     np.save(output_dir / "latents.npy", latents)
     print(f"Saved latents.npy shape={latents.shape}")
 
@@ -206,6 +196,7 @@ def main(args):
     print(f"  attn_weights.npy                 (shape={W.shape})")
     print(f"  attn_weights_mean.txt            (shape={w_mean.shape})")
     print(f"  attn_weights_median.txt          (shape={w_median.shape})")
+    print(f"  token_residue_ids.txt            (shape={residue_ids.shape})")
     print(f"  attn_importance_by_residue.txt   (residue_id, mean, median)")
 
     topk = min(20, len(residue_ids))
@@ -214,60 +205,7 @@ def main(args):
     for r, m, med in zip(residue_ids[idx], w_mean[idx], w_median[idx]):
         print(f"  residue {int(r):4d} | mean={m:.6e} | median={med:.6e}")
 
-    # =============================
-    # PLUMED EXPORT OPTIONS
-    # =============================
-    print(f"\n{'=' * 60}")
-    print("PLUMED EXPORT")
-    print(f"Mode selected: {args.plumed_export}")
-    print(f"{'=' * 60}")
-
-    # --- LEGACY EXPORT ---
-    if args.plumed_export in ("legacy", "both"):
-        print("\n[1] Exporting LEGACY encoder (sin/cos input via ARG=...)")
-
-        export_plumed_encoder(
-            model=model,
-            output_dir=output_dir,
-            n_tokens=n_tokens,
-            latent_dim=args.latent_dim,
-            residue_ids=residue_ids,
-            mask_np=np.asarray(mask_np, dtype=bool),
-            pt_name="dihedral_encoder_plumed.pt",
-            info_name="plumed_info.json",
-        )
-
-        print("✓ Saved dihedral_encoder_plumed.pt")
-        print("✓ Saved plumed_info.json")
-
-    # --- COORDS EXPORT ---
-    if args.plumed_export in ("coords", "both"):
-        if args.plumed_top is None:
-            raise RuntimeError(
-                "coords export requires --plumed_top (e.g. npt.gro)"
-            )
-
-        print("\n[2] Exporting COORDS-only encoder (ATOMS=... input)")
-
-        export_plumed_encoder_from_coords(
-            model=model,
-            output_dir=output_dir,
-            n_tokens=n_tokens,
-            latent_dim=args.latent_dim,
-            residue_ids=residue_ids,
-            mask_np=np.asarray(mask_np, dtype=bool),
-            training_top=args.topology,
-            training_traj=args.trajectory,
-            plumed_top=args.plumed_top,
-            plumed_traj=None,
-            pt_name="dihedral_encoder_fromcoords_plumed.pt",
-            info_name="plumed_info_fromcoords.json",
-        )
-
-        print("✓ Saved dihedral_encoder_fromcoords_plumed.pt")
-        print("✓ Saved plumed_info_fromcoords.json")
-
-    print(f"\nAll exports saved in: {output_dir}")
+    print(f"\nAll outputs saved in: {output_dir}")
     print(f"{'=' * 60}")
 
 
@@ -276,7 +214,7 @@ def main(args):
 # -----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train DihedralTransformerAE + export PLUMED TorchScript encoders",
+        description="Train DihedralTransformerAE (no PLUMED export) + save latents/attention",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -287,22 +225,7 @@ if __name__ == "__main__":
     # Output
     parser.add_argument("--output_dir", type=str, default="output")
 
-    # PLUMED export mode
-    parser.add_argument(
-        "--plumed_export",
-        choices=["legacy", "coords", "both"],
-        default="both",
-        help="Which PLUMED encoder export to generate",
-    )
-
-    parser.add_argument(
-        "--plumed_top",
-        type=str,
-        default=None,
-        help="Topology used in production MD/PLUMED (e.g. npt.gro). Required for coords export.",
-    )
-
-    # Model hyperparams
+    # Model hyperparams (recommended defaults for your case: ~10k frames, ~20 residues, latent 2D)
     parser.add_argument("--d_model", type=int, default=64)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--num_encoder_layers", type=int, default=3)
@@ -310,9 +233,10 @@ if __name__ == "__main__":
     parser.add_argument("--dim_feedforward", type=int, default=256)
     parser.add_argument("--dropout", type=float, default=0.2)
     parser.add_argument("--latent_dim", type=int, default=2)
+    parser.add_argument("--memory_tokens", type=int, default=4)
 
     # Training params
-    parser.add_argument("--batch_size", type=int, default=128) #64 if gpu problems
+    parser.add_argument("--batch_size", type=int, default=128)  # set 64 if GPU memory issues
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
@@ -320,6 +244,7 @@ if __name__ == "__main__":
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--min_lr_ratio", type=float, default=0.05)
 
+    # Misc
     parser.add_argument("--patience", type=int, default=25)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=2)
