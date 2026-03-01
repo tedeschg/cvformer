@@ -46,7 +46,7 @@ Analyzes the distribution of CVs in `latents.npy` and produces plots and indicat
 
 ---
 
-## Notebook: `residue_importance.ipynb`
+## Notebook: `residue-importance.ipynb`
 Performs a robust, MD-aware analysis of residue importance from attention pooling weights `w(t, i)`.
 
 ### Required files

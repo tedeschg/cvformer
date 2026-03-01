@@ -120,10 +120,10 @@ Two integration options via the `PYTORCH_MODEL` module:
 ---
 
 ## Key Features
-- ✅ **Mask-aware inference**: Automatically ignores residues without valid φ/ψ pairs (e.g., termini).
-- ✅ **Unit-circle projection**: Prevents numerical instability by normalizing sin/cos outputs.
-- ✅ **Topology mapping**: Safely maps training residue indices to different MD topologies.
-- ✅ **Metadynamics-ready**: Computes SIGMA and GRID parameters from training latent distributions.
+- **Mask-aware inference**: Automatically ignores residues without valid φ/ψ pairs (e.g., termini).
+- **Unit-circle projection**: Prevents numerical instability by normalizing sin/cos outputs.
+- **Topology mapping**: Safely maps training residue indices to different MD topologies.
+- **Metadynamics-ready**: Computes SIGMA and GRID parameters from training latent distributions.
 
 ---
 
@@ -145,7 +145,7 @@ Output: (batch, n_residues, 4)  [reconstructed]
 
 ---
 
-## 📝 Main Parameters
+## Main Parameters
 
 | Parameter | Default | Description |
 |-----------|---------|-------------|
@@ -160,20 +160,17 @@ Output: (batch, n_residues, 4)  [reconstructed]
 
 ---
 
-## 🐛 Known Issues / TODO
+## Known Issues / TODO
 
-- [ ] Test full PLUMED integration
-- [ ] Add complete PLUMED input file example
-- [ ] Support for multi-chain systems
 - [ ] Variational autoencoder (VAE) variant
 
 ---
 
-## 📊 Analysis: available notebooks
+## Analysis: available notebooks
 
 See `cvformer-test/analyze/` for ready-to-use examples:
-- `analyze_latent.ipynb`: explores CV distributions (histograms, correlations, clustering) from `latents.npy`.
-- `residue_importance.ipynb`: analyzes residue importance from attention weights (`attn_w.npy`) with robust statistics, state-wise clustering, and transition analysis.
+- `analyze-latent.ipynb`: explores CV distributions (histograms, correlations, clustering) from `latents.npy`.
+- `residue-importance.ipynb`: analyzes residue importance from attention weights (`attn_w.npy`) with robust statistics, state-wise clustering, and transition analysis.
 
 A complete guide to the notebooks is available in `cvformer-test/analyze/readme_analyze.md`.
 
@@ -181,6 +178,8 @@ For a detailed technical comparison of the implementation changes in this branch
 
 ---
 
-## 📧 Support
+## Support
 
-For bugs or feature requests, please open an issue on GitHub.
+For bugs or feature requests, please open an issue on GitHub. 
+
+For more questions: tedeschg@vscht.cz
