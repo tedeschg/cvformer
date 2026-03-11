@@ -236,22 +236,22 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="output")
 
     # Model hyperparams (recommended defaults for your case: ~10k frames, ~20 residues, latent 2D)
-    parser.add_argument("--d_model", type=int, default=254)
+    parser.add_argument("--d_model", type=int, default=64) 
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--num_encoder_layers", type=int, default=3)
     parser.add_argument("--num_decoder_layers", type=int, default=3)
     parser.add_argument("--dim_feedforward", type=int, default=256)
-    parser.add_argument("--dropout", type=float, default=0.2)
+    parser.add_argument("--dropout", type=float, default=0.15)
     parser.add_argument("--latent_dim", type=int, default=2)
-    parser.add_argument("--memory_tokens", type=int, default=4)
+    parser.add_argument("--memory_tokens", type=int, default=6)
 
     # Training params
-    parser.add_argument("--batch_size", type=int, default=128)  # set 64 if GPU memory issues
+    parser.add_argument("--batch_size", type=int, default=64)  # set 64 if GPU memory issues
     parser.add_argument("--epochs", type=int, default=1000)
     parser.add_argument("--lr", type=float, default=3e-4)
     parser.add_argument("--weight_decay", type=float, default=1e-4)
     parser.add_argument("--train_split", type=float, default=0.9)
-    parser.add_argument("--warmup_epochs", type=int, default=5)
+    parser.add_argument("--warmup_epochs", type=int, default=10)
     parser.add_argument("--min_lr_ratio", type=float, default=0.05)
 
     # Contrastive loss (optional)
@@ -260,7 +260,7 @@ if __name__ == "__main__":
     parser.add_argument("--contrastive_noise", type=float, default=0.05)
 
     # Misc
-    parser.add_argument("--patience", type=int, default=25)
+    parser.add_argument("--patience", type=int, default=20)
     parser.add_argument("--seed", type=int, default=42)
     parser.add_argument("--num_workers", type=int, default=2)
     parser.add_argument("--log_interval", type=int, default=10)
