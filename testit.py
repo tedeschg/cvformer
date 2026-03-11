@@ -1,9 +1,9 @@
 # ==========================================================
-# Dihedral Transformer Autoencoder - VERSION 0.3 (no PLUMED)
+# CVFormer: Dihedral Transformer Autoencoder
 # ==========================================================
 #
 # - Training + latents export + attention weights export
-# - NO PLUMED / TorchScript export (removed)
+# - Automatic CV discovery from MD trajectories
 #
 # ==========================================================
 
@@ -224,7 +224,7 @@ def main(args):
 # -----------------------------
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(
-        description="Train DihedralTransformerAE (no PLUMED export) + save latents/attention",
+        description="Train CVFormer DihedralTransformerAE and extract latents/attention weights",
         formatter_class=argparse.ArgumentDefaultsHelpFormatter,
     )
 
@@ -236,7 +236,7 @@ if __name__ == "__main__":
     parser.add_argument("--output_dir", type=str, default="output")
 
     # Model hyperparams (recommended defaults for your case: ~10k frames, ~20 residues, latent 2D)
-    parser.add_argument("--d_model", type=int, default=64)
+    parser.add_argument("--d_model", type=int, default=254)
     parser.add_argument("--nhead", type=int, default=4)
     parser.add_argument("--num_encoder_layers", type=int, default=3)
     parser.add_argument("--num_decoder_layers", type=int, default=3)
@@ -255,7 +255,7 @@ if __name__ == "__main__":
     parser.add_argument("--min_lr_ratio", type=float, default=0.05)
 
     # Contrastive loss (optional)
-    parser.add_argument("--contrastive_weight", type=float, default=0.0)
+    parser.add_argument("--contrastive_weight", type=float, default=0.1)
     parser.add_argument("--contrastive_temp", type=float, default=0.1)
     parser.add_argument("--contrastive_noise", type=float, default=0.05)
 

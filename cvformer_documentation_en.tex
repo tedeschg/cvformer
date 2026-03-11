@@ -1,0 +1,892 @@
+\documentclass[12pt,a4paper]{article}
+\usepackage[utf8]{inputenc}
+\usepackage[english]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{graphicx}
+\usepackage{hyperref}
+\usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{booktabs}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+
+\geometry{margin=2.5cm}
+
+\lstset{
+    basicstyle=\ttfamily\small,
+    breaklines=true,
+    frame=single,
+    backgroundcolor=\color{gray!10},
+    keywordstyle=\color{blue}\bfseries,
+    commentstyle=\color{green!60!black},
+    stringstyle=\color{red}
+}
+
+\title{\textbf{CVFormer: Transformer Autoencoder for Extracting Collective Variables from Molecular Dynamics Trajectories}\\[0.5cm]
+\large Complete Technical Documentation}
+\author{Research Project}
+\date{\today}
+
+\begin{document}
+
+\maketitle
+\tableofcontents
+\newpage
+
+\section{Introduction}
+
+\subsection{Context and Motivation}
+CVFormer is a Transformer-based system for automatic extraction of collective variables (CVs) from molecular dynamics (MD) trajectories. Collective variables are reduced-dimensional coordinates that describe the relevant conformational states of a biomolecular system, essential for enhanced sampling techniques such as metadynamics.
+
+The fundamental challenge addressed by CVFormer is: \textit{given a protein trajectory with hundreds of conformational degrees of freedom (dihedral angles), how can we automatically identify a small set (typically 2-3) of meaningful coordinates that capture the essential conformational dynamics?}
+
+Traditional approaches require manual selection of CVs based on chemical intuition or extensive trial-and-error. CVFormer automates this process through:
+\begin{enumerate}
+    \item \textbf{Learning from data}: the model observes thousands of conformational snapshots from MD simulations
+    \item \textbf{Self-supervised compression}: it learns to compress all dihedral information into a low-dimensional latent space while preserving reconstruction accuracy
+    \item \textbf{Interpretability}: attention mechanisms reveal which residues are most important for defining conformational states
+    \item \textbf{Direct integration}: the learned CVs can be immediately used in production MD simulations via PLUMED
+\end{enumerate}
+
+\subsection{The Core Idea: Why This Works}
+
+The key insight is that protein conformational changes are \textit{not random}. Despite having $N$ residues each with 2 dihedral angles ($\phi$, $\psi$), most conformational variation occurs in a much lower-dimensional manifold. CVFormer discovers this manifold through:
+
+\begin{itemize}
+    \item \textbf{Bottleneck autoencoder}: forcing information through a narrow latent space (2-3 dimensions) ensures that only the most essential conformational features are retained
+    \item \textbf{Attention mechanism}: automatically identifies which residues contribute most to conformational variability
+    \item \textbf{Periodic representation}: using $(\sin, \cos)$ pairs respects the circular nature of dihedral angles
+\end{itemize}
+
+In practice, this means CVFormer \textit{learns} what an expert would manually determine: that perhaps only 3-5 key residues in a hinge region or binding site determine most of the protein's conformational behavior.
+
+\subsection{Main Features}
+\begin{itemize}
+    \item \textbf{Transformer Architecture}: uses self-attention mechanisms to capture long-range dependencies between residues
+    \item \textbf{Attention Pooling}: aggregates residue information through attention weights, allowing identification of the most important residues
+    \item \textbf{Unit circle projection}: normalization of $(\sin, \cos)$ pairs to ensure numerical stability
+    \item \textbf{Mask handling}: automatic support for residues without valid $\phi/\psi$ angles (e.g., termini)
+    \item \textbf{Contrastive Learning}: optional SimCLR-style contrastive loss to improve representation robustness
+\end{itemize}
+
+\section{System Architecture}
+
+\subsection{File Structure}
+The project is organized in a modular structure:
+
+\begin{lstlisting}[language=bash]
+cvformer/
+├── pkgs/                           # Core modules
+│   ├── model.py                    # Transformer architecture
+│   ├── train.py                    # Training loop and metrics
+│   └── utils.py                    # Preprocessing and dataset
+├── testit.py                       # Main training script
+├── environment.yml                 # Conda dependencies
+├── data/                           # Sample data
+├── cvformer-test/                  # Tests and experiments
+│   ├── analyze/                    # Analysis notebooks
+│   └── test*/                      # Test results
+└── readme.md                       # Documentation
+\end{lstlisting}
+
+\subsection{Transformer Autoencoder Model: The Complete Pipeline}
+
+\subsubsection{Philosophy: Why an Autoencoder?}
+
+An autoencoder architecture is ideal for CV discovery because:
+\begin{enumerate}
+    \item \textbf{Self-supervised}: requires only trajectory data, no manual labels
+    \item \textbf{Information bottleneck}: the narrow latent space forces the model to discard noise and retain only essential features
+    \item \textbf{Reconstruction guarantee}: if the model can reconstruct all dihedrals from 2-3 latent values, those values must capture the conformational state
+\end{enumerate}
+
+The workflow is: \textit{dihedral angles} $\rightarrow$ \textbf{encoder} $\rightarrow$ \textit{latent CVs} $\rightarrow$ \textbf{decoder} $\rightarrow$ \textit{reconstructed dihedrals}
+
+During training, the model learns to make the latent space as informative as possible. After training, we discard the decoder and use only the encoder to compute CVs on-the-fly in MD simulations.
+
+\subsubsection{Input Representation: Respecting Periodicity}
+
+The dihedral angles $\phi$ and $\psi$ of each residue are \textit{periodic} ($-\pi$ is the same as $+\pi$). Using raw angle values would create artificial discontinuities. Instead, we project onto the unit circle:
+\begin{equation}
+\mathbf{x}_i = [\sin \phi_i, \cos \phi_i, \sin \psi_i, \cos \psi_i] \in \mathbb{R}^4
+\end{equation}
+
+This representation:
+\begin{itemize}
+    \item Preserves continuity: $\phi = -\pi$ and $\phi = +\pi$ map to the same point
+    \item Ensures bounded inputs: all values are in $[-1, 1]$
+    \item Maintains angle recovery: $\phi = \text{atan2}(\sin \phi, \cos \phi)$
+\end{itemize}
+
+The model input is therefore a sequence of $N$ tokens (residues):
+\begin{equation}
+\mathbf{X} \in \mathbb{R}^{B \times N \times 4}
+\end{equation}
+where $B$ is the batch size and $N$ is the number of residues. Each token represents one residue's backbone conformation.
+
+\subsubsection{Encoder: From Residues to Collective Variables}
+
+The encoder transforms a sequence of $N$ residue conformations into $d_{\text{latent}}$ collective variables (typically 2-3). It proceeds through five stages:
+
+\paragraph{Stage 1: Input Embedding}
+The 4-dimensional $(\sin, \cos)$ representation is projected into a higher-dimensional space ($d_{\text{model}} = 64$-$128$):
+\begin{equation}
+\mathbf{H}^{(0)} = \mathbf{X} \mathbf{W}_{\text{in}} + \mathbf{b}_{\text{in}} \quad \in \mathbb{R}^{B \times N \times d_{\text{model}}}
+\end{equation}
+
+\textit{Why higher dimension?} The Transformer needs rich representations to compute attention. The projection expands the feature space so the model can learn complex relationships between residues.
+
+\paragraph{Stage 2: Positional Encoding}
+Since Transformers have no inherent notion of sequence order, we add position information:
+\begin{equation}
+PE_{(pos, 2i)} = \sin\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right), \quad
+PE_{(pos, 2i+1)} = \cos\left(\frac{pos}{10000^{2i/d_{\text{model}}}}\right)
+\end{equation}
+
+This encoding is \textit{learnable-free} and allows the model to distinguish residue 5 from residue 50, even though both might have similar $\phi/\psi$ values. Position matters in proteins: the same angle in a loop vs. a helix has different structural implications.
+
+\paragraph{Stage 3: Self-Attention Layers}
+The core of the encoder is a stack of $L_{\text{enc}}$ Transformer layers (typically 3-4). Each layer performs:
+\begin{align}
+\text{Attention}(\mathbf{Q}, \mathbf{K}, \mathbf{V}) &= \text{softmax}\left(\frac{\mathbf{Q}\mathbf{K}^T}{\sqrt{d_k}}\right)\mathbf{V} \\
+\mathbf{H}^{(\ell+1)} &= \text{TransformerLayer}(\mathbf{H}^{(\ell)})
+\end{align}
+
+\textit{What does self-attention do?} For each residue, it computes a weighted combination of \textit{all other residues}, allowing the model to capture:
+\begin{itemize}
+    \item \textbf{Local dependencies}: neighboring residues in secondary structures
+    \item \textbf{Long-range interactions}: residues far apart in sequence but close in 3D space
+    \item \textbf{Cooperative motions}: groups of residues that move together
+\end{itemize}
+
+Each layer refines these representations. Early layers capture local patterns; deeper layers capture global conformational features.
+
+\paragraph{Stage 4: Attention Pooling (The Critical Step)}
+We now have $N$ refined token representations $\mathbf{h}_i$. To compress to a fixed-size latent vector, we use \textit{learned attention pooling}:
+\begin{align}
+s_i &= \mathbf{v}^T \tanh(\mathbf{W}_a \mathbf{h}_i) \quad \text{(score each residue)} \\
+\alpha_i &= \frac{\exp(s_i)}{\sum_{j \in \text{valid}} \exp(s_j)} \quad \text{(normalize to weights)} \\
+\mathbf{z}_{\text{pool}} &= \sum_{i=1}^{N} \alpha_i \mathbf{h}_i \quad \text{(weighted average)}
+\end{align}
+
+\textit{This is where interpretability emerges.} The weights $\alpha_i$ indicate how much each residue contributes to the latent representation. Residues with high $\alpha$ are the most important for defining conformational states. For example:
+\begin{itemize}
+    \item In a domain-motion protein: hinge residues get high weights
+    \item In a binding pocket: active-site residues dominate
+    \item In an allosteric protein: key coupling residues stand out
+\end{itemize}
+
+\paragraph{Stage 5: Latent Projection}
+Finally, the pooled vector is mapped to the target latent dimension:
+\begin{equation}
+\mathbf{z} = \text{MLP}(\mathbf{z}_{\text{pool}}) \in \mathbb{R}^{d_{\text{latent}}}
+\end{equation}
+
+The MLP consists of: Linear $\rightarrow$ LayerNorm $\rightarrow$ GELU $\rightarrow$ Dropout $\rightarrow$ Linear. This produces the final collective variables $\mathbf{z}$ that will be used for biasing simulations.
+
+\subsubsection{Decoder: Reconstructing the Full Conformation}
+
+The decoder takes the compressed latent vector $\mathbf{z}$ and reconstructs all $N$ residue dihedrals. This acts as a \textit{quality check}: if reconstruction is accurate, the latent space is sufficiently informative.
+
+\paragraph{Architecture Design Choice}
+Unlike simple autoencoders that directly expand $\mathbf{z}$ to output dimension, CVFormer uses a proper \textit{Transformer decoder} with cross-attention. This allows the model to:
+\begin{itemize}
+    \item Flexibly allocate information across residues based on learned queries
+    \item Handle variable-length proteins (via learned queries)
+    \item Leverage the same powerful attention mechanisms used in encoder
+\end{itemize}
+
+\paragraph{Stage 1: Latent Expansion to Memory}
+The latent vector is expanded into $M$ ``memory tokens'' (typically 4):
+\begin{equation}
+\mathbf{M} = \text{MLP}(\mathbf{z}) \rightarrow \text{reshape} \in \mathbb{R}^{M \times d_{\text{model}}}
+\end{equation}
+
+\textit{Why multiple memory tokens?} A single vector would create an information bottleneck. $M$ tokens provide multiple ``channels'' through which different aspects of the conformation can flow (e.g., one for secondary structure, one for overall compactness, etc.).
+
+\paragraph{Stage 2: Learned Residue Queries}
+For each of the $N$ residues, the decoder has a \textit{learned query vector} $\mathbf{q}_i$. These are trainable parameters initialized randomly and optimized during training:
+\begin{equation}
+\mathbf{Q} = \mathbf{Q}_{\text{learned}} + PE \in \mathbb{R}^{N \times d_{\text{model}}}
+\end{equation}
+
+Each query $\mathbf{q}_i$ learns to ``ask'' the memory for information relevant to residue $i$. Positional encoding is added so queries know their position in the sequence.
+
+\paragraph{Stage 3: Cross-Attention Decoder}
+The decoder runs $L_{\text{dec}}$ Transformer decoder layers (typically 3-4), where each layer performs:
+\begin{enumerate}
+    \item \textbf{Self-attention among queries}: queries communicate with each other (allowing inter-residue context)
+    \item \textbf{Cross-attention to memory}: each query attends to all memory tokens to extract relevant information
+    \item \textbf{Feedforward}: non-linear processing of the attended information
+\end{enumerate}
+
+Mathematically:
+\begin{equation}
+\mathbf{H}_{\text{dec}} = \text{TransformerDecoder}(\mathbf{Q}, \mathbf{M})
+\end{equation}
+
+\textit{What is the decoder learning?} It learns to distribute the compressed information in $\mathbf{z}$ (via memory $\mathbf{M}$) back to individual residues in a spatially coherent way.
+
+\paragraph{Stage 4: Output Projection}
+Each residue representation is projected to 4 raw values:
+\begin{equation}
+\hat{\mathbf{X}}_{\text{raw}} = \mathbf{H}_{\text{dec}} \mathbf{W}_{\text{out}} \in \mathbb{R}^{N \times 4}
+\end{equation}
+
+\paragraph{Stage 5: Unit Circle Normalization}
+To ensure outputs are valid $(\sin, \cos)$ pairs (i.e., lie on the unit circle), we normalize each pair:
+\begin{equation}
+\hat{\mathbf{x}}_{i,\phi} = \frac{\hat{\mathbf{x}}_{i,\phi}^{\text{raw}}}{\|\hat{\mathbf{x}}_{i,\phi}^{\text{raw}}\|_2}, \quad
+\hat{\mathbf{x}}_{i,\psi} = \frac{\hat{\mathbf{x}}_{i,\psi}^{\text{raw}}}{\|\hat{\mathbf{x}}_{i,\psi}^{\text{raw}}\|_2}
+\end{equation}
+
+This guarantees $\sin^2 + \cos^2 = 1$ exactly, respecting the geometric constraint. Without this, the model might output $(0.9, 0.8)$ which doesn't correspond to any valid angle.
+
+\subsection{Loss Function: Training the Autoencoder}
+
+\subsubsection{Reconstruction Loss: The Primary Objective}
+The main training objective is to minimize reconstruction error:
+\begin{equation}
+\mathcal{L}_{\text{rec}} = \frac{1}{|\mathcal{M}| \cdot B \cdot 4} \sum_{b=1}^{B} \sum_{i \in \mathcal{M}} \|\hat{\mathbf{x}}_{b,i} - \mathbf{x}_{b,i}\|_2^2
+\end{equation}
+where $\mathcal{M}$ is the set of valid residues (mask = True), $B$ is batch size.
+
+\textit{Why MSE on $(\sin, \cos)$?} This loss:
+\begin{itemize}
+    \item \textbf{Respects periodicity}: errors near $\pm \pi$ are handled correctly
+    \item \textbf{Is differentiable}: enables gradient-based optimization
+    \item \textbf{Weights all angles equally}: no bias toward specific angle ranges
+\end{itemize}
+
+\textit{How does this force good CVs?} The only way the model can achieve low reconstruction loss is by encoding \textit{all essential conformational information} in $\mathbf{z}$. Since $\mathbf{z}$ is low-dimensional (2-3D), the model must learn to:
+\begin{itemize}
+    \item Discard noise and local fluctuations
+    \item Retain only the degrees of freedom that actually vary across conformations
+    \item Implicitly identify the ``slow'' collective motions that distinguish conformational states
+\end{itemize}
+
+\subsubsection{Contrastive Loss: Improving Robustness (Optional)}
+To make the latent space more robust to noise and improve generalization, CVFormer optionally implements a SimCLR-style contrastive loss.
+
+\paragraph{The Idea}
+Two slightly perturbed versions of the same conformation should map to \textit{similar} latent vectors, while truly different conformations should map \textit{far apart}. This encourages:
+\begin{itemize}
+    \item \textbf{Invariance}: latent space ignores small thermal fluctuations
+    \item \textbf{Smoothness}: nearby conformations have nearby latent coordinates
+    \item \textbf{Discrimination}: distinct conformational states are well-separated
+\end{itemize}
+
+\paragraph{Implementation}
+\begin{enumerate}
+    \item \textbf{Data Augmentation}: For each conformation $\mathbf{x}$ in a batch, create a noisy version $\mathbf{x}'$:
+    \begin{equation}
+    \mathbf{x}' = \text{normalize}(\mathbf{x} + \epsilon), \quad \epsilon \sim \mathcal{N}(0, \sigma^2)
+    \end{equation}
+    where normalization projects back to unit circle. Typical $\sigma = 0.05$.
+
+    \item \textbf{Encode both versions}:
+    \begin{equation}
+    \mathbf{z} = \text{encoder}(\mathbf{x}), \quad \mathbf{z}' = \text{encoder}(\mathbf{x}')
+    \end{equation}
+
+    \item \textbf{NT-Xent Loss}: For each positive pair $(\mathbf{z}_i, \mathbf{z}_i')$, maximize their similarity relative to all other samples in the batch:
+    \begin{equation}
+    \mathcal{L}_{\text{NT-Xent}} = -\frac{1}{2B} \sum_{i=1}^{B} \left[\log \frac{\exp(\text{sim}(\mathbf{z}_i, \mathbf{z}_i')/\tau)}{\sum_{j \neq i} \exp(\text{sim}(\mathbf{z}_i, \mathbf{z}_j)/\tau)}\right]
+    \end{equation}
+    where $\text{sim}(\mathbf{u}, \mathbf{v}) = \frac{\mathbf{u}^T \mathbf{v}}{\|\mathbf{u}\|\|\mathbf{v}\|}$ is cosine similarity, and $\tau$ is a temperature parameter (typically 0.1).
+\end{enumerate}
+
+\paragraph{Combined Loss}
+The total loss is:
+\begin{equation}
+\mathcal{L} = \mathcal{L}_{\text{rec}} + \lambda_c \mathcal{L}_{\text{NT-Xent}}
+\end{equation}
+with $\lambda_c \approx 0.1$ (recommended). The reconstruction loss ensures informativeness; the contrastive loss ensures robustness.
+
+\subsection{Evaluation Metrics}
+
+\subsubsection{Angular Mean Absolute Error}
+To evaluate reconstruction quality in physically meaningful terms:
+
+\begin{align}
+\phi_{\text{pred}} &= \text{atan2}(\sin \phi_{\text{pred}}, \cos \phi_{\text{pred}}) \\
+\text{MAE}_\phi &= \frac{1}{|\mathcal{M}| \cdot B} \sum_{b,i \in \mathcal{M}} |\Delta_{\text{circ}}(\phi_{\text{pred}}, \phi_{\text{true}})|
+\end{align}
+
+where $\Delta_{\text{circ}}(a, b) = \text{atan2}(\sin(a-b), \cos(a-b))$ is the circular difference in $[-\pi, \pi]$.
+
+\section{Data Preprocessing: From Trajectory to Training Data}
+
+\subsection{The Challenge: Aligning Phi and Psi Angles}
+
+When MDTraj computes dihedral angles, it returns separate arrays for $\phi$ and $\psi$. However, these arrays have \textit{different lengths} and \textit{different residue orderings}:
+\begin{itemize}
+    \item $\phi$ is undefined for the first residue (no $C_{i-1}$ atom)
+    \item $\psi$ is undefined for the last residue (no $N_{i+1}$ atom)
+    \item The indices don't directly correspond to the same residue
+\end{itemize}
+
+For training, we need a consistent representation where \textit{token $i$ always represents the same residue for both $\phi$ and $\psi$}. The \texttt{compute\_aligned\_phi\_psi()} function solves this.
+
+\subsection{MDTraj Dihedral Conventions}
+
+MDTraj defines dihedrals using 4-atom quadruples:
+
+\begin{itemize}
+    \item \textbf{Phi ($\phi$)}: $[C_{i-1}, N_i, CA_i, C_i]$
+
+    The central residue is determined by atom index 1: $N_i$ (residue $i$)
+
+    \item \textbf{Psi ($\psi$)}: $[N_i, CA_i, C_i, N_{i+1}]$
+
+    The central residue is determined by atom index 0: $N_i$ (residue $i$)
+\end{itemize}
+
+When MDTraj returns phi/psi arrays:
+\begin{itemize}
+    \item \texttt{phi\_idx}: array of shape $(n_{\phi}, 4)$ containing atom indices
+    \item \texttt{phi}: array of shape $(n_{\text{frames}}, n_{\phi})$ containing angle values in radians
+    \item Similarly for psi
+\end{itemize}
+
+The key insight: we must extract the \textit{residue index} from the atom quadruples to match phi and psi.
+
+\subsection{Robust Alignment Algorithm}
+
+\begin{algorithm}[H]
+\caption{Robust $\phi/\psi$ Alignment}
+\begin{algorithmic}[1]
+\STATE Compute $\phi$ quadruples and values: \texttt{phi\_idx, phi = md.compute\_phi(traj)}
+\STATE Compute $\psi$ quadruples and values: \texttt{psi\_idx, psi = md.compute\_psi(traj)}
+\STATE Extract residue index for each $\phi$: \texttt{phi\_res[j] = residue of atom phi\_idx[j][1]}
+\STATE Extract residue index for each $\psi$: \texttt{psi\_res[k] = residue of atom psi\_idx[k][0]}
+\STATE Find common residues: $R_{\text{common}} = R_\phi \cap R_\psi$
+\STATE Sort $R_{\text{common}}$ (to maintain sequence order)
+\FOR{each residue $r \in R_{\text{common}}$}
+    \STATE Find position in phi array: $j = \text{pos}_\phi(r)$
+    \STATE Find position in psi array: $k = \text{pos}_\psi(r)$
+    \STATE $\phi_{\text{aligned}}[:, i] = \phi[:, j]$
+    \STATE $\psi_{\text{aligned}}[:, i] = \psi[:, k]$
+\ENDFOR
+\RETURN $\phi_{\text{aligned}}, \psi_{\text{aligned}}, R_{\text{common}}, \text{mask}$
+\end{algorithmic}
+\end{algorithm}
+
+\subsection{Why This Matters}
+
+Without proper alignment:
+\begin{itemize}
+    \item Token 0 might represent residue 2 for $\phi$ but residue 1 for $\psi$
+    \item The model would try to learn relationships between \textit{unrelated} angles
+    \item Training would fail or produce meaningless CVs
+\end{itemize}
+
+With alignment:
+\begin{itemize}
+    \item Token $i$ consistently represents residue $r_i$ for both angles
+    \item The model learns true residue-level conformational patterns
+    \item Attention weights correctly identify important residues
+\end{itemize}
+
+\subsection{Handling Edge Cases}
+
+The alignment procedure naturally handles:
+\begin{itemize}
+    \item \textbf{Terminal residues}: First residue has no $\phi$, last has no $\psi$ $\rightarrow$ excluded from common set
+    \item \textbf{Missing atoms}: Residues without backbone atoms (e.g., in broken chains) $\rightarrow$ excluded
+    \item \textbf{Non-standard residues}: Handled transparently via topology information
+    \item \textbf{Multi-chain proteins}: Each chain contributes its valid residues to the common set
+\end{itemize}
+
+The \texttt{mask} array (currently all True for valid residues) is kept for API consistency and future extensions (e.g., manually excluding flexible termini).
+
+\subsection{Dataset and Temporal Split}
+
+To avoid data leakage in MD trajectories (temporally correlated), a temporal split is used:
+\begin{itemize}
+    \item Training: first 90\% of frames
+    \item Validation: last 10\% of frames
+\end{itemize}
+
+This ensures that the validation set represents system states never seen during training.
+
+\section{Training: How the Model Learns}
+
+\subsection{The Training Loop: Step by Step}
+
+Training CVFormer involves iteratively updating model parameters to minimize the loss function. Here's what happens in each epoch:
+
+\subsubsection{Forward Pass}
+\begin{enumerate}
+    \item \textbf{Batch loading}: Load a batch of $B$ conformations: $\mathbf{X} \in \mathbb{R}^{B \times N \times 4}$
+    \item \textbf{Encoding}: Pass through encoder to get latent vectors: $\mathbf{z} \in \mathbb{R}^{B \times d_{\text{latent}}}$
+    \item \textbf{Decoding}: Reconstruct dihedrals from latent: $\hat{\mathbf{X}} \in \mathbb{R}^{B \times N \times 4}$
+    \item \textbf{Loss computation}: Calculate reconstruction error (and optionally contrastive loss)
+\end{enumerate}
+
+\subsubsection{Backward Pass}
+\begin{enumerate}
+    \item \textbf{Gradient computation}: Compute $\nabla_\theta \mathcal{L}$ via backpropagation
+    \item \textbf{Gradient clipping}: Clip gradients to prevent exploding gradients (max norm = 1.0)
+    \item \textbf{Parameter update}: Update weights using optimizer
+    \item \textbf{Learning rate adjustment}: Update learning rate via scheduler
+\end{enumerate}
+
+\subsubsection{Validation and Early Stopping}
+After each epoch:
+\begin{enumerate}
+    \item Evaluate on validation set (last 10\% of trajectory)
+    \item Track validation loss, MAE$_\phi$, MAE$_\psi$
+    \item If validation loss improves: save model weights, reset patience counter
+    \item If validation loss doesn't improve: increment patience counter
+    \item If patience counter reaches limit (e.g., 25 epochs): stop training
+\end{enumerate}
+
+This prevents overfitting and ensures the model generalizes to unseen conformations.
+
+\subsection{Optimization Algorithm}
+
+\subsubsection{AdamW Optimizer}
+CVFormer uses AdamW (Adam with weight decay), which combines:
+\begin{itemize}
+    \item \textbf{Adaptive learning rates}: each parameter gets its own learning rate based on gradient history
+    \item \textbf{Momentum}: smooths updates using exponential moving averages
+    \item \textbf{Weight decay}: regularizes by penalizing large weights (prevents overfitting)
+\end{itemize}
+
+Update rule:
+\begin{equation}
+\theta_{t+1} = \theta_t - \eta_t \left(\frac{\hat{m}_t}{\sqrt{\hat{v}_t} + \epsilon} + \lambda \theta_t\right)
+\end{equation}
+
+where $\hat{m}_t$ is bias-corrected first moment, $\hat{v}_t$ is bias-corrected second moment, $\eta_t$ is learning rate, and $\lambda$ is weight decay coefficient (typically $10^{-4}$).
+
+\subsubsection{Learning Rate Scheduler: Warmup + Cosine Decay}
+
+A fixed learning rate often leads to unstable training (especially early on) or suboptimal convergence (late in training). CVFormer uses a two-phase scheduler:
+
+\paragraph{Phase 1: Warmup (first 5 epochs)}
+Linearly increase learning rate from 0 to $\eta_{\text{base}}$:
+\begin{equation}
+\eta_t = \eta_{\text{base}} \cdot \frac{t}{T_{\text{warmup}}}
+\end{equation}
+
+\textit{Why?} At initialization, weights are random. Large learning rates cause wild updates. Warmup allows the model to ``find its footing'' before aggressive optimization.
+
+\paragraph{Phase 2: Cosine Annealing (remaining epochs)}
+Gradually decrease learning rate following a cosine curve:
+\begin{equation}
+\eta_t = \eta_{\text{min}} + \frac{1}{2}(\eta_{\text{base}} - \eta_{\text{min}})\left(1 + \cos\left(\pi \frac{t - T_{\text{warmup}}}{T_{\text{total}} - T_{\text{warmup}}}\right)\right)
+\end{equation}
+
+where $\eta_{\text{min}} = 0.05 \cdot \eta_{\text{base}}$ (minimum learning rate).
+
+\textit{Why cosine?} As training progresses, we want smaller updates to fine-tune the model. The smooth cosine decay:
+\begin{itemize}
+    \item Allows rapid learning early on (high $\eta$)
+    \item Enables precise convergence later (low $\eta$)
+    \item Avoids sudden drops that cause training instability
+\end{itemize}
+
+\begin{figure}[h]
+\centering
+\textit{[Learning rate schedule: linear warmup for 5 epochs, then cosine decay from $3 \times 10^{-4}$ to $1.5 \times 10^{-5}$ over remaining epochs]}
+\end{figure}
+
+\subsection{Recommended Hyperparameters}
+
+\begin{table}[h]
+\centering
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Parameter} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{d\_model} & 64 & Embedding dimension \\
+\texttt{nhead} & 4 & Number of attention heads \\
+\texttt{num\_encoder\_layers} & 3 & Encoder layers \\
+\texttt{num\_decoder\_layers} & 3 & Decoder layers \\
+\texttt{dim\_feedforward} & 256 & Feedforward dimension \\
+\texttt{dropout} & 0.2 & Dropout rate \\
+\texttt{latent\_dim} & 2 & Latent space dimension \\
+\texttt{memory\_tokens} & 4 & Memory tokens in decoder \\
+\texttt{batch\_size} & 128 & Batch size \\
+\texttt{lr} & 3e-4 & Learning rate (peak) \\
+\texttt{warmup\_epochs} & 5 & Warmup epochs \\
+\texttt{patience} & 25 & Early stopping patience \\
+\bottomrule
+\end{tabular}
+\caption{Model and training hyperparameters}
+\end{table}
+
+\subsection{Training Procedure}
+
+\begin{algorithm}[H]
+\caption{Main Training Loop}
+\begin{algorithmic}[1]
+\STATE Load trajectory and compute aligned $\phi/\psi$
+\STATE Create dataset with temporal split (90/10)
+\STATE Initialize model, optimizer, scheduler
+\FOR{epoch = 1 to max\_epochs}
+    \FOR{batch in train\_loader}
+        \STATE $\hat{\mathbf{X}}, \mathbf{z} = \text{model}(\mathbf{X}, \text{mask})$
+        \STATE $\mathcal{L}_{\text{rec}} = \text{dihedral\_loss}(\hat{\mathbf{X}}, \mathbf{X}, \text{mask})$
+        \IF{contrastive\_weight $> 0$}
+            \STATE $\mathbf{X}' = \text{augment}(\mathbf{X})$
+            \STATE $\mathbf{z}' = \text{model.encode}(\mathbf{X}', \text{mask})$
+            \STATE $\mathcal{L}_c = \text{NT-Xent}(\mathbf{z}, \mathbf{z}')$
+            \STATE $\mathcal{L} = \mathcal{L}_{\text{rec}} + \lambda_c \mathcal{L}_c$
+        \ELSE
+            \STATE $\mathcal{L} = \mathcal{L}_{\text{rec}}$
+        \ENDIF
+        \STATE Backpropagation and gradient clipping
+        \STATE Update optimizer and scheduler
+    \ENDFOR
+    \STATE Evaluation on validation set
+    \IF{validation loss improves}
+        \STATE Save best model weights
+        \STATE Reset patience counter
+    \ELSE
+        \STATE Increment patience counter
+    \ENDIF
+    \IF{patience counter $\geq$ max\_patience}
+        \STATE Early stopping
+    \ENDIF
+\ENDFOR
+\end{algorithmic}
+\end{algorithm}
+
+
+\section{Results Analysis: Interpreting the Learned CVs}
+
+\subsection{What the Model Produces}
+
+After training completes, CVFormer outputs several artifacts in the \texttt{output/} directory:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{File} & \textbf{Content} \\
+\midrule
+\texttt{best\_model\_weights.pt} & Trained model parameters \\
+\texttt{latents.npy} & CV values for all frames $(N_{\text{frames}} \times d_{\text{latent}})$ \\
+\texttt{attn\_weights.npy} & Attention weights per frame $(N_{\text{frames}} \times N_{\text{residues}})$ \\
+\texttt{attn\_weights\_mean.txt} & Mean attention weight per residue \\
+\texttt{attn\_weights\_median.txt} & Median attention weight per residue \\
+\texttt{token\_residue\_ids.txt} & Mapping from token index to residue ID \\
+\texttt{attn\_importance\_by\_residue.txt} & Combined table of residue importance \\
+\texttt{config.txt} & All hyperparameters used \\
+\bottomrule
+\end{tabular}
+\caption{Output files from training}
+\end{table}
+
+\subsection{Understanding the Latent Space}
+
+The \texttt{latents.npy} file contains the collective variables for each frame. For a 2D latent space:
+\begin{itemize}
+    \item Each row is a frame from the trajectory
+    \item Column 0 is CV1, column 1 is CV2
+    \item These are the coordinates you'll use for metadynamics biasing
+\end{itemize}
+
+\subsubsection{What Should You See?}
+
+For a well-trained model on a protein with conformational transitions:
+
+\paragraph{Good signs:}
+\begin{itemize}
+    \item \textbf{Clustered structure}: Different conformational states form distinct clusters in latent space
+    \item \textbf{Smooth trajectories}: Transitions between states follow continuous paths (no random jumps)
+    \item \textbf{Low reconstruction error}: MAE$_\phi$ and MAE$_\psi < 0.2$ radians ($\sim 11°$)
+    \item \textbf{Clear separation}: If you know your protein has 2-3 states, you should see 2-3 clusters
+\end{itemize}
+
+\paragraph{Warning signs:}
+\begin{itemize}
+    \item \textbf{Uniform distribution}: CVs are random noise, not capturing conformational states
+    \item \textbf{Collapsed latent space}: All points in a tiny region (model not using latent capacity)
+    \item \textbf{High reconstruction error}: MAE $> 0.5$ radians (model can't compress effectively)
+    \item \textbf{Validation loss diverging}: Model is overfitting to training data
+\end{itemize}
+
+If you see warning signs: try increasing \texttt{latent\_dim}, adding more encoder layers, training longer, or using contrastive loss.
+
+\subsection{Analysis Notebooks}
+
+\subsubsection{analyze-latent.ipynb}
+Latent space analysis:
+\begin{itemize}
+    \item \textbf{Distributions}: 1D and 2D histograms of CVs
+    \item \textbf{Clustering}: identification of discrete conformational states (K-means, DBSCAN)
+    \item \textbf{Dynamics}: temporal evolution and state transitions
+    \item \textbf{Correlations}: correlation analysis with other structural metrics (RMSD, Rg, etc.)
+\end{itemize}
+
+\subsubsection{residue-importance.ipynb}
+Residue importance analysis:
+\begin{itemize}
+    \item \textbf{Global statistics}: mean, median, std of attention weights per residue
+    \item \textbf{State-wise clustering}: identification of key residues for each conformational state
+    \item \textbf{Transition analysis}: residues that change importance during transitions
+    \item \textbf{Visualization}: heatmaps, ranked importance plots
+\end{itemize}
+
+\subsection{Attention Weight Interpretation: Finding Key Residues}
+
+The attention pooling weights $\alpha_i$ are perhaps the most valuable output for biological insight. They answer: \textit{``Which residues are most important for defining conformational states?''}
+
+\subsubsection{What Are These Weights?}
+
+Recall from the encoder architecture:
+\begin{equation}
+\mathbf{z}_{\text{pool}} = \sum_{i=1}^{N} \alpha_i \mathbf{h}_i
+\end{equation}
+
+The weight $\alpha_i$ tells us how much residue $i$ contributes to the pooled representation (and thus to the final CV values). Higher $\alpha_i$ means residue $i$ has more influence.
+
+\subsubsection{Two Levels of Analysis}
+
+\paragraph{1. Global Importance (Mean/Median Weights)}
+The files \texttt{attn\_weights\_mean.txt} and \texttt{attn\_weights\_median.txt} contain average weights across all frames. These identify residues that are \textit{consistently important} throughout the simulation.
+
+\textbf{Biological interpretation:}
+\begin{itemize}
+    \item High mean weight: residue participates in major conformational changes
+    \item Examples: hinge residues in domain motions, active site in binding events, allosteric coupling sites
+\end{itemize}
+
+\paragraph{2. State-Specific Importance (Per-Frame Weights)}
+The file \texttt{attn\_weights.npy} contains weights for each frame. By clustering frames in latent space and averaging weights per cluster, you can identify:
+\begin{itemize}
+    \item Residues important for \textit{specific} conformational states
+    \item Residues that change importance during transitions
+    \item Different sets of residues controlling different motions
+\end{itemize}
+
+\subsubsection{Practical Use Cases}
+
+\paragraph{Drug Design}
+High-attention residues near a binding pocket indicate where conformational flexibility matters most. These are candidates for:
+\begin{itemize}
+    \item Allosteric drug targeting
+    \item Mutagenesis studies
+    \item Understanding drug resistance mechanisms
+\end{itemize}
+
+\paragraph{Protein Engineering}
+If you want to stabilize a particular conformation:
+\begin{itemize}
+    \item Identify high-attention residues
+    \item Mutate them to favor desired $\phi/\psi$ angles
+    \item Or introduce cross-links to restrict motion
+\end{itemize}
+
+\paragraph{Mechanistic Understanding}
+Compare attention weights with known structural features:
+\begin{itemize}
+    \item Do high-attention residues coincide with experimental data (e.g., NMR dynamics)?
+    \item Are they in expected regions (domain interfaces, loops)?
+    \item Do they reveal unexpected coupling mechanisms?
+\end{itemize}
+
+\subsubsection{Example Interpretation}
+
+Suppose CVFormer identifies residues 45, 67, and 89 as having highest mean attention weights:
+\begin{enumerate}
+    \item \textbf{Check structure}: Locate these residues in 3D structure
+    \item \textbf{Analyze dynamics}: Compute RMSD/RMSF for these residues across trajectory
+    \item \textbf{Correlate with CVs}: Plot $\phi_{45}$, $\psi_{45}$ vs CV1 — is there strong correlation?
+    \item \textbf{Biological context}: Are these in functional regions (active site, binding interface, etc.)?
+\end{enumerate}
+
+The attention mechanism essentially performs an automated version of what an expert would do manually: identify the few residues that ``matter'' for conformational behavior.
+
+\section{Practical Usage}
+
+\subsection{Installation}
+
+\begin{lstlisting}[language=bash]
+# Create conda environment
+mamba env create -f environment.yml
+mamba activate cvformer
+\end{lstlisting}
+
+The environment includes:
+\begin{itemize}
+    \item Python 3.10
+    \item PyTorch (CPU or CUDA)
+    \item MDTraj for preprocessing
+    \item NumPy, Matplotlib for analysis
+\end{itemize}
+
+\subsection{Basic Training}
+
+\begin{lstlisting}[language=bash]
+python testit.py \
+  --trajectory data/traj_skip100NoH.xtc \
+  --topology data/2JOF-0-proteinNoH.pdb \
+  --output_dir output \
+  --latent_dim 2 \
+  --epochs 1000 \
+  --batch_size 128 \
+  --patience 25
+\end{lstlisting}
+
+\subsection{Training with Contrastive Learning}
+
+\begin{lstlisting}[language=bash]
+python testit.py \
+  --trajectory data/traj_skip100NoH.xtc \
+  --topology data/2JOF-0-proteinNoH.pdb \
+  --output_dir output_contrastive \
+  --latent_dim 2 \
+  --contrastive_weight 0.1 \
+  --contrastive_temp 0.1 \
+  --contrastive_noise 0.05
+\end{lstlisting}
+
+
+\section{Implementation Improvements}
+
+\subsection{Evolution from Main Branch}
+
+The \texttt{guglielmo\_contrastive\_implementation} branch introduces significant improvements over \texttt{main}:
+
+\begin{table}[h]
+\centering
+\small
+\begin{tabular}{@{}lll@{}}
+\toprule
+\textbf{Aspect} & \textbf{Main} & \textbf{Guglielmo Implementation} \\
+\midrule
+Structure & Monolithic (single file) & Modular (pkgs/) \\
+Dihedral alignment & Simple & Robust with mask \\
+Normalization & Basic & Unit circle projection \\
+Scheduler & Fixed & Warmup + Cosine decay \\
+Metrics & MSE & MSE + Angular MAE \\
+Interpretability & - & Attention weights export \\
+Analysis & - & Notebook suite \\
+Contrastive loss & - & SimCLR-style optional \\
+\bottomrule
+\end{tabular}
+\caption{Implementation comparison}
+\end{table}
+
+\subsection{Key Advantages}
+
+\begin{enumerate}
+    \item \textbf{Robustness}: automatic handling of complex topologies and termini
+    \item \textbf{Interpretability}: extraction and analysis of attention weights
+    \item \textbf{Stability}: unit circle normalization and gradient clipping
+    \item \textbf{Flexibility}: modular architecture for easy extensions
+\end{enumerate}
+
+\section{Limitations and Future Developments}
+
+\subsection{Current Limitations}
+\begin{itemize}
+    \item The model is purely deterministic (no variational autoencoder)
+    \item Requires sufficiently long training trajectories (thousands of frames)
+    \item Attention pooling uses soft weights (not sparse)
+    \item Does not directly support multi-chain or heterogeneous systems
+\end{itemize}
+
+\subsection{Possible Extensions}
+\begin{itemize}
+    \item \textbf{VAE variant}: variational implementation for sampling and uncertainty quantification
+    \item \textbf{Hierarchical models}: multi-scale encoder to capture dependencies at different levels
+    \item \textbf{Graph Neural Networks}: integration of topological information (contacts, distances)
+    \item \textbf{Multi-task learning}: joint training on different properties (stability, function, etc.)
+    \item \textbf{Active learning}: automatic selection of configurations for enhanced sampling
+\end{itemize}
+
+\section{Conclusions}
+
+\subsection{Summary: The Complete CVFormer Pipeline}
+
+CVFormer provides an end-to-end solution for automatic CV discovery from MD trajectories. The complete workflow is:
+
+\begin{enumerate}
+    \item \textbf{Input}: MD trajectory (any format supported by MDTraj) + topology file
+    \item \textbf{Preprocessing}: Robust alignment of $\phi/\psi$ angles, conversion to $(\sin, \cos)$ representation
+    \item \textbf{Training}: Autoencoder learns to compress conformational information into 2-3 latent dimensions
+    \item \textbf{Analysis}: Extract CVs and attention weights, visualize conformational landscape
+    \item \textbf{Interpretation}: Identify key residues driving conformational changes
+    \item \textbf{Export}: CVs can be saved and used for further analysis or custom biasing implementations
+\end{enumerate}
+
+\subsection{Key Innovations}
+
+CVFormer advances beyond traditional autoencoder approaches through:
+
+\begin{itemize}
+    \item \textbf{Transformer architecture}: Captures long-range residue dependencies via self-attention
+    \item \textbf{Attention pooling}: Provides interpretable importance scores for each residue
+    \item \textbf{Proper periodicity handling}: $(\sin, \cos)$ representation + unit circle normalization
+    \item \textbf{Robust preprocessing}: Automatic handling of terminal residues, missing atoms, multi-chain systems
+    \item \textbf{Contrastive learning}: Optional robustness enhancement via SimCLR-style loss
+    \item \textbf{Comprehensive output}: Latent variables, attention weights, and detailed metrics
+\end{itemize}
+
+\subsection{When to Use CVFormer}
+
+CVFormer is most effective when:
+
+\paragraph{Good fit:}
+\begin{itemize}
+    \item You have a trajectory (5000+ frames) covering multiple conformational states
+    \item The conformational dynamics are driven by backbone dihedrals (not just sidechain or overall shape)
+    \item You want interpretable CVs (which residues matter)
+    \item You need to identify key residues for conformational transitions
+\end{itemize}
+
+\paragraph{Consider alternatives if:}
+\begin{itemize}
+    \item Conformational changes are primarily sidechain-driven (use tools that include $\chi$ angles)
+    \item You have very limited data (<1000 frames)
+    \item The system is highly disordered (IDPs may need different representations)
+    \item You only need dimensionality reduction for visualization (PCA/t-SNE may suffice)
+\end{itemize}
+
+\subsection{Main Strengths}
+
+\begin{enumerate}
+    \item \textbf{Automation}: No manual CV selection required
+    \item \textbf{Interpretability}: Attention weights reveal \textit{which} residues matter
+    \item \textbf{Robustness}: Handles complex topologies, multi-chain systems, missing residues
+    \item \textbf{Extensibility}: Modular design supports easy modifications (new loss functions, architectures, etc.)
+\end{enumerate}
+
+\subsection{Looking Forward}
+
+CVFormer represents a step toward \textit{automated} conformational analysis, where:
+\begin{itemize}
+    \item CVs are discovered from data rather than expert intuition
+    \item The model tells you which parts of the protein are important
+    \item The learned representation provides interpretable insights into protein dynamics
+\end{itemize}
+
+The approach is general and can be extended to:
+\begin{itemize}
+    \item Include sidechain dihedrals ($\chi$ angles)
+    \item Incorporate distance-based features (contacts, hydrogen bonds)
+    \item Multi-task learning (predict binding affinity, stability, etc.)
+    \item Transfer learning (pre-train on many proteins, fine-tune on target)
+\end{itemize}
+
+The project is continuously evolving and open to contributions to improve robustness, performance, and applicability to increasingly complex biomolecular systems.
+
+\section*{References}
+
+\begin{itemize}
+    \item Vaswani et al., ``Attention Is All You Need'', NeurIPS 2017
+    \item Chen et al., ``A Simple Framework for Contrastive Learning of Visual Representations'' (SimCLR), ICML 2020
+    \item Bonomi et al., ``PLUMED: A portable plugin for free-energy calculations with molecular dynamics'', Computer Physics Communications 2009
+    \item McGibbon et al., ``MDTraj: A Modern Open Library for the Analysis of Molecular Dynamics Trajectories'', Biophysical Journal 2015
+\end{itemize}
+
+\end{document}
