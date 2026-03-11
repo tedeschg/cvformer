@@ -33,11 +33,68 @@ def angular_mae(x_hat: torch.Tensor, x: torch.Tensor, mask: torch.Tensor | None 
 
     return float(mae_phi), float(mae_psi)
 
+# -----------------------------
+# Contrastive loss (SimCLR-style)
+# -----------------------------
+def _normalize_z(z: torch.Tensor) -> torch.Tensor:
+    return torch.nn.functional.normalize(z, dim=1, eps=1e-8)
+
+
+def _nt_xent_loss(z1: torch.Tensor, z2: torch.Tensor, temperature: float = 0.1) -> torch.Tensor:
+    """
+    NT-Xent loss over a batch of positive pairs (z1[i], z2[i]).
+    """
+    if z1.size(0) <= 1:
+        return torch.zeros((), device=z1.device)
+
+    z1 = _normalize_z(z1)
+    z2 = _normalize_z(z2)
+
+    z = torch.cat([z1, z2], dim=0)  # (2B, D)
+    sim = torch.matmul(z, z.T) / max(temperature, 1e-8)  # (2B, 2B)
+
+    # mask self-similarity
+    mask = torch.eye(sim.size(0), dtype=torch.bool, device=sim.device)
+    sim = sim.masked_fill(mask, float("-inf"))
+
+    B = z1.size(0)
+    targets = torch.arange(B, device=sim.device)
+    targets = torch.cat([targets + B, targets], dim=0)  # positives indices
+
+    return torch.nn.functional.cross_entropy(sim, targets)
+
+
+def _augment_sincos(x: torch.Tensor, noise_std: float = 0.05) -> torch.Tensor:
+    """
+    Add small noise to sin/cos pairs and re-normalize to unit circle.
+    x: (B, N, 4)
+    """
+    if noise_std <= 0:
+        return x
+    noise = torch.randn_like(x) * noise_std
+    x_noisy = x + noise
+    # re-normalize phi and psi pairs
+    phi = x_noisy[..., 0:2]
+    psi = x_noisy[..., 2:4]
+    phi = phi / (phi.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+    psi = psi / (psi.norm(p=2, dim=-1, keepdim=True) + 1e-8)
+    return torch.cat([phi, psi], dim=-1)
+
 
 # -----------------------------
 # Train / Validate
 # -----------------------------
-def train_epoch(model, loader, optimizer, scheduler, device, mask):
+def train_epoch(
+    model,
+    loader,
+    optimizer,
+    scheduler,
+    device,
+    mask,
+    contrastive_weight: float = 0.0,
+    contrastive_temp: float = 0.1,
+    contrastive_noise: float = 0.05,
+):
     model.train()
     total = 0.0
 
@@ -46,6 +103,14 @@ def train_epoch(model, loader, optimizer, scheduler, device, mask):
 
         x_hat, _ = model(batch, mask)
         loss = dihedral_loss(x_hat, batch, mask)
+
+        if contrastive_weight > 0.0:
+            x1 = batch
+            x2 = _augment_sincos(batch, noise_std=contrastive_noise)
+            z1 = model.encode(x1, mask)
+            z2 = model.encode(x2, mask)
+            c_loss = _nt_xent_loss(z1, z2, temperature=contrastive_temp)
+            loss = loss + contrastive_weight * c_loss
 
         optimizer.zero_grad()
         loss.backward()

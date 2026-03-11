@@ -134,7 +134,17 @@ def main(args):
     print("\nStarting training...\n")
 
     for epoch in range(args.epochs):
-        tr_loss = train_epoch(model, train_loader, optimizer, scheduler, device, mask_t)
+        tr_loss = train_epoch(
+            model,
+            train_loader,
+            optimizer,
+            scheduler,
+            device,
+            mask_t,
+            contrastive_weight=args.contrastive_weight,
+            contrastive_temp=args.contrastive_temp,
+            contrastive_noise=args.contrastive_noise,
+        )
         val_loss, mae_phi, mae_psi = validate_with_metrics(model, val_loader, device, mask_t)
 
         if epoch % args.log_interval == 0:
@@ -243,6 +253,11 @@ if __name__ == "__main__":
     parser.add_argument("--train_split", type=float, default=0.9)
     parser.add_argument("--warmup_epochs", type=int, default=5)
     parser.add_argument("--min_lr_ratio", type=float, default=0.05)
+
+    # Contrastive loss (optional)
+    parser.add_argument("--contrastive_weight", type=float, default=0.0)
+    parser.add_argument("--contrastive_temp", type=float, default=0.1)
+    parser.add_argument("--contrastive_noise", type=float, default=0.05)
 
     # Misc
     parser.add_argument("--patience", type=int, default=25)
