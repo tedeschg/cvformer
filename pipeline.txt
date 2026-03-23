@@ -1,0 +1,16 @@
+# 1. Training (genera best_model_weights.pt, config.txt, latents.npy)
+python testit.py --trajectory ... --topology ... --output_dir output/
+
+# 2. Export PLUMED model
+python pkgs/export_legacy_plumed.py --output_dir output/
+
+# 3. plumed.dat
+python pkgs/make_plumed_file.py \
+  --mode flat_sincos \
+  --pt output/dihedral_encoder_plumed.pt \
+  --info output/plumed_info.json \
+  --latents output/latents.npy \
+  --out output/plumed.dat \
+  --top topology.pdb \
+  --plumed_top plumed_topology.pdb \
+  --whole_entity0 "1-N"

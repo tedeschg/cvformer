@@ -1,7 +1,7 @@
 import torch
 
-from pkgs.utils import sincos_to_angle_torch, circular_diff
-from pkgs.model import dihedral_loss
+from utils import sincos_to_angle_torch, circular_diff
+from model import dihedral_loss
 
 # -----------------------------
 # Metrics (angular MAE)

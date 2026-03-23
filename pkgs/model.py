@@ -135,26 +135,37 @@ class DihedralTransformerAE(nn.Module):
         return torch.cat([phi, psi], dim=-1)
 
     @staticmethod
-    def _canonicalize_mask(mask: Optional[torch.Tensor], B: int, N: int, device: torch.device) -> Optional[torch.Tensor]:
+    def _canonicalize_mask(
+        mask: Optional[torch.Tensor],
+        B: int,
+        N: int,
+        ref: torch.Tensor,
+    ) -> Optional[torch.Tensor]:
         """
-        Returns bool mask (B, N) where True=valid, False=padding.
-        Accepts None, (N,), (B, N).
+        Returns mask (B,N) bool where True=valid and False=padding.
+        Accepts None, (N,), or (B,N).
+        TorchScript-safe: uses ref tensor to move device.
         """
         if mask is None:
             return None
-        mask = mask.to(device=device, dtype=torch.bool)
+
+        mask = mask.to(ref).to(dtype=torch.bool)
+
         if mask.dim() == 1:
-            assert mask.numel() == N
-            mask = mask.unsqueeze(0).expand(B, -1)
-        elif mask.dim() == 2:
-            assert mask.shape == (B, N)
-        else:
-            raise ValueError("mask must be None, (N,), or (B,N)")
-        return mask
+            if mask.numel() != N:
+                raise RuntimeError("mask (N,) wrong length")
+            return mask.unsqueeze(0).expand(B, -1)
+
+        if mask.dim() == 2:
+            if mask.size(0) != B or mask.size(1) != N:
+                raise RuntimeError("mask (B,N) wrong shape")
+            return mask
+
+        raise RuntimeError("mask must be None, (N,), or (B,N)")
 
     def _encode_core(self, x: torch.Tensor, mask: Optional[torch.Tensor] = None) -> Tuple[torch.Tensor, torch.Tensor]:
         B, N, _ = x.shape
-        mask_bn = self._canonicalize_mask(mask, B, N, x.device)
+        mask_bn = self._canonicalize_mask(mask, B, N, x)
 
         h = self.input_proj(x)
         h = self.pos_enc(h)
@@ -168,7 +179,8 @@ class DihedralTransformerAE(nn.Module):
         scores = self.attn_pool(h).squeeze(-1)  # (B, N)
 
         if mask_bn is not None:
-            scores = scores.masked_fill(~mask_bn, torch.finfo(scores.dtype).min)
+            # TorchScript-safe constant (works in fp16/bf16/fp32)
+            scores = scores.masked_fill(~mask_bn, -1.0e4)
 
         w = torch.softmax(scores, dim=1)       # (B, N)
         pooled = (h * w.unsqueeze(-1)).sum(1)  # (B, d_model)
@@ -185,7 +197,7 @@ class DihedralTransformerAE(nn.Module):
     def decode(self, z: torch.Tensor, mask: Optional[torch.Tensor] = None) -> torch.Tensor:
         B = z.size(0)
         N = self.n_tokens
-        mask_bn = self._canonicalize_mask(mask, B, N, z.device)
+        mask_bn = self._canonicalize_mask(mask, B, N, z)
 
         mem = self.from_latent(z).view(B, self.memory_tokens, self.d_model)
 

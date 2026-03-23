@@ -2,8 +2,9 @@
 __pycache__/
 .venv/
 .idea/
-cvformer-test/*
+cvformer-test/
 data/
+
 
 # Files
 *.pyc
@@ -12,7 +13,4 @@ data/
 *.pdb
 *.dat
 
-# Include specific files inside cvformer-test
-!cvformer-test/
-!cvformer-test/analyze/
-!cvformer-test/analyze/**
+
